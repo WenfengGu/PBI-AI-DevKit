@@ -408,6 +408,27 @@ class RemotePowerBI:
         """Execute DAX and return raw rows (dict per row)."""
         return self.execute_dax(query)
 
+    @staticmethod
+    def row_val(row: dict, key: str, default=None):
+        """Get a value from a REST API ROW() result.
+
+        The Power BI REST API wraps column names in brackets: [Key].
+        This helper tries both bare key and [Key] formats.
+        """
+        if key in row:
+            return row[key]
+        bracketed = "[%s]" % key
+        if bracketed in row:
+            return row[bracketed]
+        return default
+
+    def execute_dax_scalar(self, query: str):
+        """Execute a DAX query and return the first scalar value."""
+        rows = self.execute_dax(query)
+        if rows:
+            return list(rows[0].values())[0]
+        return None
+
     def get_info(self) -> dict:
         """Get connection info summary."""
         self._ensure_resolved()

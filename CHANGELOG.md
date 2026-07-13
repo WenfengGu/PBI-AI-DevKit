@@ -4,6 +4,26 @@ All notable changes to the PBI AI DevKit project.
 
 ---
 
+## [1.3.0] - 2026-07-13
+
+### Added
+- **`row_val()` helper** (`ssas_client.py`): handles REST API `[Key]` bracket-format column names
+- **`execute_dax_scalar()` helper** (`ssas_client.py`): single-value DAX query convenience method
+- **`smoke_test.py`** (`tests/`): 6-test connectivity check (Token, Workspace, Dataset, DAX, Business Query, Freshness) — completes in ~10s
+- **`dq_preselling.py`** (`tests/`): reusable data quality check for Preselling Reporting CN, auto-discovers column names from BIM, supports `--quick` and `--output` modes
+- **`VERSION` file**: single source of truth for version number
+
+### Changed
+- `build_release.py` now reads version from `VERSION` file
+- `build_release.py` includes new test files (`smoke_test.py`, `dq_preselling.py`)
+- `.gitignore` expanded to exclude Claude IDE artifacts
+- **Git initialized** — full version control with `git tag` for each release
+
+### Fixed
+- `release/` folder is now tracked in git (was previously gitignored)
+
+---
+
 ## [1.2.0] - 2026-07-13
 
 ### Added
