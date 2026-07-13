@@ -175,7 +175,7 @@ Add to your `.mcp.json`:
 ## File Structure
 
 ```
-+-- server.py               MCP server (23 tools, dual-mode)
++-- server.py               MCP server (26 tools, dual-mode)
 +-- ssas_client.py           Connection layer (local + remote + BIM)
 +-- bpa.py                   DAX Best Practice Analyzer (18 rules)
 +-- dependency_tracker.py    Measure dependency tracker

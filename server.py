@@ -48,6 +48,7 @@ from power_query_ssas import (
 )
 from bpa import DaxAnalyzer, analyze_measures
 from dependency_tracker import DependencyTracker, build_and_analyze
+from report_parser import ReportParser, VISUAL_LABELS, SKIP_TYPES
 
 SERVER_NAME = "powerbi-model"
 SERVER_VERSION = "1.2.0"
@@ -390,6 +391,41 @@ TOOLS = [
                 "table": {"type": "string", "description": "Table containing the measure (optional, helps disambiguate)"},
                 "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
+        },
+    },
+    {
+        "name": "get_report_structure",
+        "description": "Parse a PBIX file to extract report layout: pages, visuals, and their field/measure bindings. Supports both PBIX file path and already-extracted Layout JSON file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pbix_path": {"type": "string", "description": "Path to PBIX file or extracted Layout JSON file. Auto-discovers local PBIX if omitted."},
+                "page": {"type": "string", "description": "Filter to a specific page name (substring match)"},
+            },
+        },
+    },
+    {
+        "name": "get_report_measures",
+        "description": "List all measures actually used in the report. Optionally cross-check with BIM file to find measures that exist in the model but are NOT used in any report visual.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pbix_path": {"type": "string", "description": "Path to PBIX file or Layout JSON. Auto-discovers local PBIX if omitted."},
+                "cross_check": {"type": "boolean", "description": "Cross-check with BIM to find unused measures. Requires PBI_BIM_PATH env var or model BIM file."},
+                "bim_path": {"type": "string", "description": "Path to BIM file for cross-check (overrides PBI_BIM_PATH env var)"},
+            },
+        },
+    },
+    {
+        "name": "get_report_field_usage",
+        "description": "Find which pages and visuals use a specific measure or column. Useful for impact analysis before modifying a measure.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "field_name": {"type": "string", "description": "Measure or column name to search for (substring match)"},
+                "pbix_path": {"type": "string", "description": "Path to PBIX file or Layout JSON. Auto-discovers local PBIX if omitted."},
+            },
+            "required": ["field_name"],
         },
     },
 ]
@@ -1379,6 +1415,59 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
                 return "\n".join(results)
             finally:
                 server.Disconnect()
+
+        elif tool_name == "get_report_structure":
+            pbix_path = arguments.get("pbix_path", "")
+            page_filter = arguments.get("page", "")
+
+            if not pbix_path:
+                instances = discover_pbi_instances()
+                if instances:
+                    pbix_path = instances[0].get("pbix_path", "")
+                if not pbix_path:
+                    return "No PBIX path provided and no local PBIX found. Specify --pbix_path."
+
+            rp = ReportParser(pbix_path)
+            if page_filter:
+                visuals = rp.get_visuals(page_filter)
+                lines = [f"# Page: {page_filter}", f"Visuals: {len(visuals)}", ""]
+                for v in visuals:
+                    lines.append(f"## [{v['type']}]")
+                    for role, qr in v["fields"]:
+                        lines.append(f"- {role}: `{qr}`")
+                    lines.append("")
+                return "\n".join(lines)
+            else:
+                return rp.format_structure()
+
+        elif tool_name == "get_report_measures":
+            pbix_path = arguments.get("pbix_path", "")
+            cross_check = arguments.get("cross_check", False)
+            bim_path = arguments.get("bim_path", os.environ.get("PBI_BIM_PATH", ""))
+
+            if not pbix_path:
+                instances = discover_pbi_instances()
+                if instances:
+                    pbix_path = instances[0].get("pbix_path", "")
+                if not pbix_path:
+                    return "No PBIX path provided. Specify --pbix_path."
+
+            rp = ReportParser(pbix_path, bim_path=bim_path if cross_check else None)
+            return rp.format_measures(cross_check=cross_check)
+
+        elif tool_name == "get_report_field_usage":
+            field_name = arguments.get("field_name", "")
+            pbix_path = arguments.get("pbix_path", "")
+
+            if not pbix_path:
+                instances = discover_pbi_instances()
+                if instances:
+                    pbix_path = instances[0].get("pbix_path", "")
+                if not pbix_path:
+                    return "No PBIX path provided. Specify --pbix_path."
+
+            rp = ReportParser(pbix_path)
+            return rp.format_usage(field_name)
 
         else:
             return f"Invalid tool: {tool_name}"

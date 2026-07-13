@@ -97,7 +97,7 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 |    v                                            |
 |  server.py (Python 3.11)                       |
 |    +-- MCP Protocol Layer (hand-written)        |
-|    +-- 23 tool definitions                      |
+|    +-- 26 tool definitions                      |
 |    +-- Tool Handler Dispatcher                  |
 |         |                                        |
 |    +----+--------------------------+            |
@@ -177,6 +177,9 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 | 21 | `get_model_graph` | DMV: tables+columns+relationships topology | Read |
 | 22 | `bpa_analyze` | Python regex static analysis (18 rules) | Read |
 | 23 | `dependency_analyze` | Python graph theory (BFS/DFS + topological) | Read |
+| 24 | `get_report_structure` | PBIX zip parsing: pages, visuals, field bindings | Read |
+| 25 | `get_report_measures` | Report measure usage + BIM cross-check | Read |
+| 26 | `get_report_field_usage` | Impact analysis: measure/column -> page/visual | Read |
 
 ---
 
@@ -398,7 +401,7 @@ _get_connection(mode="auto")
   |
   +-- mode="auto" (default)
       +-- 1. Local PBIX found? -> Local mode (ADOMD.NET)
-      |     +-- All 23 tools available
+      |     +-- All 26 tools available
       +-- 2. No local, remote configured? -> Remote mode
       |     +-- BIM configured? -> RemotePowerBIWithSchema
       |     +-- No BIM? -> RemotePowerBI (DAX only)
@@ -475,7 +478,7 @@ _get_connection(mode="auto")
 |    |   |   +-- Found -> Local mode (ADOMD.NET)           |
 |    |   |   |   +-- Read: DMV ($SYSTEM.TMSCHEMA_*)       |
 |    |   |   |   +-- Write: TOM (model.SaveChanges)       |
-|    |   |   |   +-- All 23 tools available               |
+|    |   |   |   +-- All 26 tools available               |
 |    |   |   +-- Not found -> Step 2                       |
 |    |   |                                                |
 |    |   +-- Step 2: check remote config                  |
@@ -576,7 +579,7 @@ This is the `QueryDefinition` column in the SSAS DMV partitions table, containin
 |--------|-------|
 | Total files | 90+ |
 | Code volume | ~550 KB |
-| Tools | 23 |
+| Tools | 26 |
 | Core modules | 6 (ssas_client, bpa, dependency_tracker, bim_reader, power_query_ssas, RemotePowerBI) |
 | BPA rules | 18 (extensible) |
 | Skill workflows | 12 |

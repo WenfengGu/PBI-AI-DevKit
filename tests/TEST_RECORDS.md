@@ -249,7 +249,27 @@ All 32 tables' Power Query M code is readable through the SSAS connection.
 | 32 | `smoke_test.py` | Quick connectivity check (6 tests, <15s) | 6/6 PASS |
 | 33 | `dq_preselling.py` | Data quality verification for Preselling Reporting CN | 7/7 PASS |
 
-**Total: 33 test suites**
+### Phase 10: Report Layout Parser (2026-07-13)
+
+| # | Test File | Purpose | Result |
+|---|-----------|---------|:---:|
+| 34 | `report_parser.py` (CLI) | PBIX layout parsing: pages, visuals, field bindings | 8/8 PASS |
+| 35 | `report_parser.py` (--measure) | Measure usage lookup (impact analysis) | 67 hits |
+| 36 | `report_parser.py` (--measures --unused) | BIM cross-check: 568 truly unused measures | 1680→15 |
+| 37 | `server.py` (tool registration) | 3 new MCP tools registered (26 total) | 3/3 PASS |
+
+**Report Parser Results:**
+- 8 pages discovered, 97 visuals (77 slicers, 10 tables, 5 matrices, 5 chiclets)
+- 15 measures from `_Report Measures_` table, 45 columns across 6 tables
+- Most-used measure: `Reservation/Ordered Qty` (10 visuals across 7 pages)
+- BIM cross-check: 1,680 model measures → 15 in report → 568 potentially unused
+
+**New MCP Tools (v1.4.0):**
+- `get_report_structure` — full report layout
+- `get_report_measures` — measure usage + BIM cross-check
+- `get_report_field_usage` — impact analysis before modifying a measure
+
+**Total: 37 test suites**
 
 **Remote Connection Results:**
 

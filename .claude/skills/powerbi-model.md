@@ -27,7 +27,7 @@ the user asks to directly interact with an open PBIX file (reading/writing
 measures, DAX, tables, Power Query, relationships).
 
 The MCP server supports **dual-mode** connection:
-- **Local mode** (default): PBIX open in Power BI Desktop -> 23 tools, full read/write
+- **Local mode** (default): PBIX open in Power BI Desktop -> 26 tools, full read/write
 - **Remote mode** (auto-fallback): No PBIX open -> BIM schema + REST API, read-only DAX queries
 
 ---
@@ -40,7 +40,7 @@ The MCP server supports **dual-mode** connection:
 
 | `discover` output | Mode | Capabilities |
 |-------------------|------|--------------|
-| Shows local PBIX instances | **Local** | Full 23 tools: read + write + metadata |
+| Shows local PBIX instances | **Local** | Full 26 tools: read + write + metadata + report |
 | "No Power BI Desktop instances" + remote configured | **Remote** | Read-only: BIM metadata + REST API DAX queries |
 | Neither | **None** | Tell user to open PBIX or configure remote |
 
@@ -142,6 +142,9 @@ When the user asks for DAX, distinguish between two different things:
 | `create_table` | User asks "create a new table" |
 | `create_column` | User asks "add a column to this table" |
 | `batch_operations` | User asks "do multiple changes at once" or "batch create these measures" |
+| `get_report_structure` | User asks "what pages/visuals are in this report?" or "show me the report layout" |
+| `get_report_measures` | User asks "which measures are actually used in the report?" or "find unused measures" |
+| `get_report_field_usage` | User asks "which visuals use this measure?" or "impact analysis before changing X" |
 
 ---
 
@@ -338,3 +341,26 @@ User: "Give me a summary of June 2026 sales performance"
 4. Present results in a structured table format with MoM/YoY comparisons
 5. Highlight anomalies, trends, and actionable insights
 6. Always include: percentage breakdowns, growth rates, and key takeaways
+
+### 5. Report Layout Analysis (v1.4.0+)
+
+**Use `get_report_structure` when the user asks:**
+- "What pages are in this report?"
+- "What visuals are on each page?"
+- "Show me the report layout"
+
+**Use `get_report_measures` when the user asks:**
+- "Which measures are actually used in the report?"
+- "Are there unused measures I can clean up?"
+- Cross-check with `cross_check: true` + `bim_path` to find BIM-only measures
+
+**Use `get_report_field_usage` when the user asks:**
+- "Which visuals use this measure?" (impact analysis before modification)
+- "Where is this column referenced in the report?"
+- "What will break if I change X?"
+
+**Report Cleanup Workflow:**
+1. Run `get_report_measures` with `cross_check: true` to find measures in BIM but NOT in any report visual
+2. Focus on measures outside `KPI_Curr` and `Measure` tables (those are shared calculation tables)
+3. Present the top 20-30 unused measures grouped by table
+4. Confirm with user before deleting any measure

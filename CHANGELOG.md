@@ -4,6 +4,20 @@ All notable changes to the PBI AI DevKit project.
 
 ---
 
+## [1.4.0] - 2026-07-13
+
+### Added
+- **`report_parser.py`** — new module for parsing PBIX report layouts (pages, visuals, field/measure bindings, slicers, filters)
+- **`get_report_structure`** (MCP tool #24) — extract complete report layout: pages, visuals, fields, measures
+- **`get_report_measures`** (MCP tool #25) — list measures actually used in report, with optional BIM cross-check for unused measures
+- **`get_report_field_usage`** (MCP tool #26) — find which pages/visuals use a specific measure or column (impact analysis)
+
+### Changed
+- Total MCP tools: 23 → 26
+- `build_release.py` now includes `report_parser.py`
+
+---
+
 ## [1.3.0] - 2026-07-13
 
 ### Added

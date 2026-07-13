@@ -96,7 +96,7 @@ ChatGPT 和 GitHub Copilot 通过 Microsoft 官方插件直接调用 Power BI RE
 |    v                                             |
 |  server.py (Python 3.11)                         |
 |    +-- MCP Protocol (hand-written)               |
-|    +-- 23 tools defined                          |
+|    +-- 26 tools defined                          |
 |    +-- Tool Handler Dispatcher                   |
 |         |                                        |
 |    +----+--------------------------+             |
@@ -176,6 +176,9 @@ ChatGPT 和 GitHub Copilot 通过 Microsoft 官方插件直接调用 Power BI RE
 | 21 | `get_model_graph` | DMV: 表+列+关系 拓扑图 | 读 |
 | 22 | `bpa_analyze` | Python 正则静态分析 (18 条规则) | 读 |
 | 23 | `dependency_analyze` | Python 图论 (BFS/DFS + 拓扑排序) | 读 |
+| 24 | `get_report_structure` | PBIX zip 解析: 页面、视觉对象、字段绑定 | 读 |
+| 25 | `get_report_measures` | 报表 Measure 使用情况 + BIM 交叉对比 | 读 |
+| 26 | `get_report_field_usage` | 影响分析: measure/column -> 页面/视觉对象 | 读 |
 
 ---
 
@@ -376,7 +379,7 @@ _get_connection(mode="auto")
   |
   +-- mode="auto" (default)
       +-- 1. Local PBIX found? -> Local mode (ADOMD.NET)
-      |     +-- All 23 tools available
+      |     +-- All 26 tools available
       +-- 2. No local, remote configured? -> Remote mode
       |     +-- BIM configured? -> RemotePowerBIWithSchema
       |     +-- No BIM? -> RemotePowerBI (DAX only)
@@ -479,7 +482,7 @@ $SYSTEM.TMSCHEMA_PARTITIONS.QueryDefinition
 |------|------|
 | 总文件数 | 90+ |
 | 代码量 | ~550 KB |
-| 工具数 | 23 |
+| 工具数 | 26 |
 | 核心模块 | 6 (ssas_client, bpa, dependency_tracker, bim_reader, power_query_ssas, RemotePowerBI) |
 | BPA 规则 | 18 (可扩展) |
 | Skill 工作流 | 12 |

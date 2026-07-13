@@ -81,12 +81,13 @@ Open a PBIX file in Power BI Desktop and you're ready to go.
 Skill Layer (Auto-triggered)
   Trigger words -> Power BI tools
   -------------------------------------------
-MCP Server (23 tools)
+MCP Server (26 tools)
   discover, get_measures, search_dax
   replace_in_measure, run_dax, create_measure
   get_power_query, audit_power_query
   bpa_analyze, dependency_analyze
   batch_operations, get_model_graph
+  get_report_structure, get_report_measures
   -------------------------------------------
 Connection Layer (Local-first, Remote-fallback)
   Local:  ADOMD.NET + TOM -> msmdsrv.exe
@@ -221,7 +222,7 @@ Combine BIM schema knowledge with live data:
 
 ```
 PBI-AI-DevKit/
-+-- server.py               MCP server (23 tools, dual-mode)
++-- server.py               MCP server (26 tools, dual-mode)
 +-- ssas_client.py           Connection layer (local + remote + BIM)
 +-- bpa.py                   DAX Best Practice Analyzer (18 rules)
 +-- dependency_tracker.py    Measure dependency tracker
