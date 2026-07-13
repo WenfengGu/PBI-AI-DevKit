@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Credentials (user must create their own)
+.mcp.json
+.pbi_token_cache.json
+.pbi_device_code.txt
+
+# OS
+.DS_Store
+Thumbs.db

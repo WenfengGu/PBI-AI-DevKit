@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "pbi-ai-devkit": {
+      "command": "python",
+      "args": ["<PUT_YOUR_PATH_HERE>\\PBI-AI-DevKit\\server.py"],
+      "env": {
+        "PATH": "<PUT_YOUR_PBI_PATH_HERE>\\Microsoft Power BI Desktop\\bin;${PATH}",
+        "PBI_XMLA_SERVER": "<OPTIONAL: powerbi://api.powerbi.cn/v1.0/myorg/MyWorkspace>",
+        "PBI_XMLA_DATABASE": "<OPTIONAL: My Semantic Model Name>",
+        "PBI_USERNAME": "<OPTIONAL: your.email@company.com>",
+        "PBI_PASSWORD": "<OPTIONAL: your password>"
+      }
+    }
+  }
+}
