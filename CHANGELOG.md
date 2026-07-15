@@ -4,6 +4,29 @@ All notable changes to the PBI AI DevKit project.
 
 ---
 
+## [1.4.2] - 2026-07-13
+
+### Added
+- **`dax_safe_modify.py`**: DAX modification safety utility with defensive checks (comment scope detection, bracket validation, human confirmation)
+- **`validate_dax_change`** (MCP tool #27): preview DAX modifications before applying, detects // comment scope and bracket mismatches
+
+### Changed
+- Total MCP tools: 26 -> 27
+
+---
+
+## [1.4.1] - 2026-07-13
+
+### Added
+- **`_extract_report_measures()`** (`report_parser.py`): auto-extracts report-level measures from PBIX `modelExtensions` (Live Connection PBIX local measures)
+- **`get_report_measures_dax()`** API: returns full DAX expressions for all report-level measures
+- **`--report-measures`** CLI flag: outputs complete DAX for all measures defined in the PBIX
+
+### Fixed
+- Live Connection PBIX measure discovery: measures in `modelExtensions` are now detected automatically, no longer falsely reported as "missing from BIM"
+
+---
+
 ## [1.4.0] - 2026-07-13
 
 ### Added

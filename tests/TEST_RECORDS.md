@@ -271,6 +271,38 @@ All 32 tables' Power Query M code is readable through the SSAS connection.
 
 **Total: 37 test suites**
 
+### Phase 11: Live Connection PBIX Measure Extraction + DAX Audit (2026-07-13, v1.4.1)
+
+| # | Test File | Purpose | Result |
+|---|-----------|---------|:---:|
+| 38 | `report_parser.py` (--report-measures) | Extract 52 report-level measures from modelExtensions | 52/52 extracted |
+| 39 | `report_parser.py` (get_report_measures_dax) | Programmatic API for measure DAX extraction | OK |
+| 40 | `extract_measures.py` | Deep dive into PBIX modelExtensions entities | 1 entity, 52 measures |
+| 41 | `cross_layer_validation_v2.py` | Cross-layer: report + BIM + live data | 5 issues found |
+| 42 | `sample_data_for_team.py` | Sample data for investigation (orphans, cancel, neg qty) | 12 queries |
+
+**Live Connection Measure Extraction Results:**
+- PBIX `modelExtensions` contains 1 entity (`_Report Measures_`) with 52 measures
+- 15 measures used in report visuals, 37 intermediate/reserve measures
+- Found 1 DAX bug: `//+[Reservation Cancelled Qty]` — comment syntax disables subtraction
+
+**Cross-Layer Validation Findings:**
+- Order→Customer: 3,583 orphans (7.7%) — Greater China zone, evenly distributed
+- Reservation→Customer: 799 orphans (2.3%)
+- Cancellation spike: 2025 H2 47-59% — REGULAR_RESERVATION type 49.3% cancel rate
+- Negative Qty: 3,060 rows (6.6%) — ALL from Digital channel, RETURNED status
+- Date anomaly: `Sales_Order_Creation_Date` defaults causing 38-year avg gap
+- SHIPPED without Fulfilled=Y: 66 rows — ALL China Ecommerce
+
+**Report Parser Enhancement:**
+- `_extract_report_measures()` — auto-extracts measures from `modelExtensions` in Live Connection PBIX
+- `get_report_measures_dax()` — returns dict of {measure_name: {name, table, expression, ...}}
+- `--report-measures` CLI flag — outputs full DAX for all report-level measures
+
+**Total: 42 test suites**
+
+### Phase 12: DAX Safe Modification + MCP Tool #27 (2026-07-13, v1.4.2)
+
 **Remote Connection Results:**
 
 | Test | Result | Detail |
@@ -342,3 +374,88 @@ All 32 tables' Power Query M code is readable through the SSAS connection.
 17. **Column name discovery** -- always query BIM first for actual column names before writing DAX; never guess (e.g., `CUST_KEY` not `Customer ID`)
 18. **Token TTL = 59min** -- always set PBI_USERNAME/PBI_PASSWORD via `os.environ.setdefault()` in test scripts to survive cache expiry
 19. **Smoke test first** -- run `smoke_test.py` (6 checks, <15s) before any data quality script to confirm connection health
+20. **Live Connection PBIX measures** -- check `modelExtensions` in Layout JSON for report-level measures that are NOT in the BIM file
+21. **DAX string comparison is case-insensitive** -- `"No exchange" = "No Exchange"` in DAX, but `EXACT()` is case-sensitive; always use `UPPER()` for clarity
+22. **DAX `//` comment scope** -- `//` comments out the ENTIRE rest of the line, including closing brackets; never do blind string replacement on commented DAX
+
+---
+
+## Data Quality Analysis Playbook
+
+> Standard test cases for comprehensive data quality verification. Apply in this order.
+
+### Phase A: Connectivity & Discovery
+
+| Step | Test | Tool |
+|------|------|------|
+| A1 | Smoke test (token, workspace, dataset, DAX) | `smoke_test.py` |
+| A2 | Parse report structure (pages, visuals, measures, columns) | `report_parser.py` |
+| A3 | Extract report-level measures (Live Connection PBIX) | `report_parser.py --report-measures` |
+
+### Phase B: Cross-Layer Validation
+
+| Step | Test | Query Pattern |
+|------|------|------|
+| B1 | Validate report columns exist in BIM model | Compare `report_parser.get_columns()` vs `bim_reader.get_columns()` |
+| B2 | Validate report measures exist in BIM or modelExtensions | Compare `report_parser.get_measures()` vs BIM measures + modelExtensions |
+| B3 | Audit DAX for hardcoded values, missing fallbacks | `dax_safe_modify.py` + manual review of all `CALCULATE`, `DIVIDE`, `SWITCH`, `SELECTEDVALUE` |
+
+### Phase C: Data Quality Metrics
+
+| Step | Test | Query Pattern |
+|------|------|------|
+| C1 | Row counts for key tables | `COUNTROWS('Table')` |
+| C2 | NULL/blank check on key columns | `COUNTROWS(FILTER(table, ISBLANK([col])))` |
+| C3 | Referential integrity: fact -> dimension | `COUNTROWS(FILTER(fact, NOT(CONTAINS(dim, dim[key], fact[key]))))` |
+| C4 | Distinct value distribution for dimension columns | `SUMMARIZECOLUMNS(table[col], COUNTROWS(table))` |
+| C5 | Data freshness: max date per table | `MAX(table[DateColumn])` |
+
+### Phase D: Enum Value Consistency
+
+| Step | Test | Query Pattern |
+|------|------|------|
+| D1 | List all distinct values for status/type columns | `SUMMARIZECOLUMNS(table[StatusCol], COUNTROWS(table))` |
+| D2 | Check DAX filter values against actual data enums | Compare DAX hardcoded strings vs D1 results |
+| D3 | Identify dead conditions (DAX references value not in data) | `FILTER(table, col IN {DAX_values})` vs `FILTER(table, TRUE)` |
+| D4 | Identify BLANK exclusion (DAX misses BLANK rows) | `FILTER(table, ISBLANK(col))` count vs filter impact |
+
+### Phase E: Business Metric Validation
+
+| Step | Test | Query Pattern |
+|------|------|------|
+| E1 | Monthly trend of key measures | `SUMMARIZECOLUMNS(Calendar[YearMonth], measure1, measure2)` |
+| E2 | Key measure breakdown by dimension | `SUMMARIZECOLUMNS(dim[col], measure1, measure2)` |
+| E3 | Channel/store segmentation | `SUMMARIZECOLUMNS(table[Channel], measures)` |
+| E4 | Anomaly detection: negative values, zeros, future dates | `FILTER(table, Qty < 0)`, `FILTER(table, Date > TODAY())` |
+
+### Phase F: Environment Comparison (DEV vs PRD)
+
+| Step | Test | Query Pattern |
+|------|------|------|
+| F1 | Row counts comparison | Same query on both environments |
+| F2 | Date range comparison | `MIN/MAX` on both |
+| F3 | NULL/blank comparison | Same NULL check on both |
+| F4 | Referential integrity comparison | Same orphan check on both |
+| F5 | Enum value distribution comparison | `SUMMARIZECOLUMNS` on both |
+| F6 | Channel/segment distribution comparison | Same segmentation on both |
+
+### Phase G: DAX Fix & Verify
+
+| Step | Test | Tool |
+|------|------|------|
+| G1 | Preview DAX change with defensive checks | `validate_dax_change` or `dax_safe_modify.py` |
+| G2 | Apply fix to PBIX | `fix_*.py` script with JSON parsing |
+| G3 | Verify fix applied correctly | `report_parser.py --report-measures` on fixed PBIX |
+| G4 | Re-run affected metrics to confirm impact | Same queries as Phase C/E with fixed filters |
+
+### Example: Preselling Reporting CN (2026-07-13)
+
+| Phase | Tests Run | Issues Found |
+|------|:--:|------|
+| A | 3/3 | Live Connection PBIX, 52 report-level measures |
+| B | 3/3 | BIM stale (15 measures missing), 27 hardcoded values, 7 DIVIDE no fallback |
+| C | 5/5 | 11.3% customer linkage broken, 30.6% Creation Date defaults |
+| D | 4/4 | Flag Exchange: "false" dead condition + BLANK excluded (14,225 rows) |
+| E | 4/4 | Cancelled Qty exceeds Ordered Qty since 2025 H2 (peak +61%) |
+| F | 6/6 | PRD lacks Digital channel entirely (14,225 rows missing) |
+| G | 4/4 | 27 measures fixed, 5.64M EUR recovered, 1 syntax error caught by defensive check |

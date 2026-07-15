@@ -49,6 +49,7 @@ from power_query_ssas import (
 from bpa import DaxAnalyzer, analyze_measures
 from dependency_tracker import DependencyTracker, build_and_analyze
 from report_parser import ReportParser, VISUAL_LABELS, SKIP_TYPES
+from dax_safe_modify import DaxModifier
 
 SERVER_NAME = "powerbi-model"
 SERVER_VERSION = "1.2.0"
@@ -426,6 +427,19 @@ TOOLS = [
                 "pbix_path": {"type": "string", "description": "Path to PBIX file or Layout JSON. Auto-discovers local PBIX if omitted."},
             },
             "required": ["field_name"],
+        },
+    },
+    {
+        "name": "validate_dax_change",
+        "description": "Safely preview a DAX modification before applying it. Detects comment scope, bracket mismatches, and other issues. Always use this before modifying any DAX expression.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "Current DAX expression"},
+                "old_text": {"type": "string", "description": "Text to replace in the expression"},
+                "new_text": {"type": "string", "description": "Replacement text"},
+            },
+            "required": ["expression", "old_text", "new_text"],
         },
     },
 ]
@@ -1468,6 +1482,45 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
 
             rp = ReportParser(pbix_path)
             return rp.format_usage(field_name)
+
+        elif tool_name == "validate_dax_change":
+            expression = arguments.get("expression", "")
+            old_text = arguments.get("old_text", "")
+            new_text = arguments.get("new_text", "")
+
+            if not expression or not old_text:
+                return "Error: expression and old_text are required."
+
+            dm = DaxModifier(expression)
+            lines = []
+
+            ranges = dm._comment_ranges(expression)
+            if ranges:
+                lines.append("=== // Comments Found ===")
+                for start, end, text in ranges:
+                    commented = text[2:].strip()
+                    lines.append("  Comment: %s" % text)
+                    lines.append("  Range: chars %d-%d (full scope, not just //)" % (start, end))
+                    lines.append("  Commented-out content: '%s'" % commented)
+                lines.append("")
+
+            lines.append("=== Proposed Change ===")
+            if old_text in expression:
+                dm.proposed = expression.replace(old_text, new_text)
+                old_ok, old_msg = dm._check_brackets(expression)
+                new_ok, new_msg = dm._check_brackets(dm.proposed)
+                lines.append("  Remove: %s" % old_text[:80])
+                lines.append("  Add:    %s" % new_text[:80])
+                lines.append("  Bracket status: %s -> %s" % (old_msg, new_msg))
+                if old_ok and not new_ok:
+                    lines.append("  WARNING: This change introduces bracket mismatch!")
+                lines.append("")
+                lines.append("=== Proposed Expression ===")
+                lines.append(dm.proposed)
+            else:
+                lines.append("  ERROR: '%s' not found in expression." % old_text)
+
+            return "\n".join(lines)
 
         else:
             return f"Invalid tool: {tool_name}"

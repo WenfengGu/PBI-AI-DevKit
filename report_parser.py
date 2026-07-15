@@ -87,6 +87,10 @@ class ReportParser:
 
         self._build_indexes()
 
+        # Extract report-level measures from modelExtensions (Live Connection PBIX)
+        self._report_measures = {}  # measure_name -> {expression, table, formatString, ...}
+        self._extract_report_measures()
+
         # Load BIM for cross-reference (optional)
         self.bim_measures = set()
         if bim_path and os.path.exists(bim_path):
@@ -170,7 +174,50 @@ class ReportParser:
             return True
         return False
 
+    def _extract_report_measures(self):
+        """Extract report-level measures from modelExtensions (Live Connection PBIX).
+
+        Live Connection PBIX files can define measures locally in the Layout JSON's
+        config.modelExtensions. These are NOT in the BIM file — they only exist in the PBIX.
+        """
+        try:
+            config_str = self.layout.get("config", "{}")
+            config = json.loads(config_str)
+            extensions = config.get("modelExtensions", [])
+            for ext in extensions:
+                for entity in ext.get("entities", []):
+                    entity_name = entity.get("name", "")
+                    for m in entity.get("measures", []):
+                        name = m.get("name", "")
+                        expr = m.get("expression", "")
+                        if isinstance(expr, list):
+                            expr = "\n".join(expr)
+                        folder = m.get("displayFolder", "")
+                        # Store with full key: "Entity.MeasureName"
+                        key = f"{entity_name}.{name}" if entity_name else name
+                        self._report_measures[key] = {
+                            "name": name,
+                            "table": entity_name,
+                            "expression": str(expr),
+                            "displayFolder": folder,
+                            "formatString": m.get("formatString", ""),
+                            "dataType": m.get("dataType", ""),
+                        }
+        except Exception:
+            pass  # Not all PBIX files have modelExtensions
+
     # ── Public API ──────────────────────────────────────────────
+
+    def get_report_measures_dax(self) -> dict:
+        """Return all report-level measures with their DAX expressions.
+
+        These are measures defined locally in the PBIX (modelExtensions),
+        not in the remote BIM model. Only present in Live Connection PBIX files
+        that have report-level measures.
+
+        Returns: {measure_name: {name, table, expression, displayFolder, formatString, dataType}}
+        """
+        return self._report_measures
 
     def get_pages(self) -> list[dict]:
         """Return list of all pages."""
@@ -188,8 +235,11 @@ class ReportParser:
         return results
 
     def get_measures(self) -> set:
-        """Return all measure names used in the report."""
-        return set(self._measure_index.keys())
+        """Return all measure names used in the report (visuals + report-level measures)."""
+        measures = set(self._measure_index.keys())
+        # Also include report-level measures from modelExtensions
+        measures.update(self._report_measures.keys())
+        return measures
 
     def get_columns(self) -> set:
         """Return all column names used in the report."""
@@ -349,6 +399,7 @@ if __name__ == "__main__":
     parser.add_argument("--column", "-c", type=str, help="Find usage of a specific column")
     parser.add_argument("--slicers", action="store_true", help="Show slicer report")
     parser.add_argument("--measures", action="store_true", help="Show measure report")
+    parser.add_argument("--report-measures", action="store_true", help="Show DAX for report-level measures (modelExtensions)")
     parser.add_argument("--unused", type=str, metavar="BIM_PATH", help="Cross-check with BIM for unused measures")
     parser.add_argument("--structure", action="store_true", help="Show full report structure")
     args = parser.parse_args()
@@ -363,6 +414,21 @@ if __name__ == "__main__":
         print(rp.format_slicers())
     elif args.measures:
         print(rp.format_measures(cross_check=bool(args.unused)))
+    elif args.report_measures:
+        dax_measures = rp.get_report_measures_dax()
+        if dax_measures:
+            print(f"# Report-Level Measures (from PBIX modelExtensions)\n")
+            print(f"Total: {len(dax_measures)}\n")
+            for key, m in sorted(dax_measures.items()):
+                print(f"## {key}")
+                print(f"```dax")
+                print(m['expression'])
+                print(f"```")
+                if m.get('displayFolder'):
+                    print(f"Folder: {m['displayFolder']}")
+                print()
+        else:
+            print("No report-level measures found (not a Live Connection PBIX or no local measures).")
     elif args.structure:
         print(rp.format_structure())
     else:

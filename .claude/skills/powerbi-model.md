@@ -359,6 +359,11 @@ User: "Give me a summary of June 2026 sales performance"
 - "Where is this column referenced in the report?"
 - "What will break if I change X?"
 
+**IMPORTANT — Live Connection PBIX Measures:**
+- Live Connection PBIX files can define report-level measures in `modelExtensions` (stored in the PBIX Layout JSON, NOT in the BIM)
+- Use `report_parser.py --report-measures` to extract their DAX
+- If BIM cross-check shows "missing" measures, check `modelExtensions` first before concluding BIM is stale
+
 **Report Cleanup Workflow:**
 1. Run `get_report_measures` with `cross_check: true` to find measures in BIM but NOT in any report visual
 2. Focus on measures outside `KPI_Curr` and `Measure` tables (those are shared calculation tables)
