@@ -20,7 +20,7 @@ As of July 2026, there are three main paths for AI assistants to interact with P
 
 1. **Official MCP exists** -- with local (modeling) and remote (query) servers, authentication varies by target
 2. **Community solutions are read-only** -- can read metadata, but none support Measure modification
-3. **ChatGPT/Copilot integration** -- tied to their respective ecosystems, not available to Claude Code users
+3. **ChatGPT/Copilot integration** -- tied to their respective ecosystems, cannot fully meet our actual business scenario needs
 
 ### Feature Comparison
 
@@ -39,6 +39,10 @@ As of July 2026, there are three main paths for AI assistants to interact with P
 | Model topology graph | Yes | No | **Yes** |
 | DAX best practice analysis | Not mentioned | No | **Yes (18 rules)** |
 | Measure dependency tracking | Not mentioned | No | **Yes (fwd/rev/cycles)** |
+| Report layout parsing | No | No | **Yes (pages/visuals/fields)** |
+| Report measure usage audit | No | No | **Yes (+ BIM cross-check)** |
+| DAX change safety preview | Not mentioned | No | **Yes** |
+| PBIX safe modification | Not mentioned | No | **Yes (anti-corruption)** |
 | Remote DAX queries | Yes | No | **Yes (REST API)** |
 | BIM-driven remote queries | Not mentioned | No | **Yes** |
 | Local/remote dual-mode | Yes | No | **Yes (local-first)** |
@@ -81,13 +85,14 @@ Open a PBIX file in Power BI Desktop and you're ready to go.
 Skill Layer (Auto-triggered)
   Trigger words -> Power BI tools
   -------------------------------------------
-MCP Server (26 tools)
+MCP Server (27 tools)
   discover, get_measures, search_dax
   replace_in_measure, run_dax, create_measure
   get_power_query, audit_power_query
   bpa_analyze, dependency_analyze
   batch_operations, get_model_graph
   get_report_structure, get_report_measures
+  get_report_field_usage, validate_dax_change
   -------------------------------------------
 Connection Layer (Local-first, Remote-fallback)
   Local:  ADOMD.NET + TOM -> msmdsrv.exe
@@ -170,6 +175,27 @@ Understand ripple effects before making changes:
 > "What will break if I change the 'Total Sales' measure?"
 > -> Shows forward dependencies, backward impact, and transitive effects
 
+### Analyze Report Structure
+
+Understand which measures and fields are used on each report page:
+
+> "Which measures are used on the 'Sales Overview' page?"
+> -> Lists all visuals, fields, and measure bindings on that page
+
+### Cross-Check Report vs Model
+
+Find measures that exist in the model but are never used in any report:
+
+> "Are there any unused measures in this report?"
+> -> BIM cross-check against report layout, identifies dead code
+
+### Preview DAX Changes Safely
+
+Verify modifications before applying them:
+
+> "Preview what happens if I replace 'LY' with 'PY' in all measures."
+> -> Detects comment-scope conflicts, bracket mismatches, before any write
+
 ### Query Remote Models
 
 When no local PBIX is open, automatically query cloud datasets:
@@ -205,11 +231,24 @@ Combine BIM schema knowledge with live data:
 
 ---
 
+## Recent Updates
+
+See [CHANGELOG.md](CHANGELOG.md) for full history.
+
+| Version | Date | Highlights |
+|---------|------|------------|
+| **1.4.3** | 2026-07-14 | PBIX safe modification (`pbix_safe.py`), anti-corruption |
+| **1.4.2** | 2026-07-13 | DAX change safety preview (`validate_dax_change`) |
+| **1.4.0** | 2026-07-13 | Report layout parsing — 3 new tools (`get_report_structure`, `get_report_measures`, `get_report_field_usage`) |
+| **1.2.0** | 2026-07-13 | Remote REST API, BIM-driven queries, dual-mode connection |
+
+---
+
 ## Technical Info
 
 | Item | Detail |
 |------|--------|
-| Version | 1.2.0 (2026-07) |
+| Version | 1.4.3 (2026-07) |
 | License | MIT |
 | Python | 3.11+ |
 | Dependencies | pythonnet, msal, Power BI Desktop |
@@ -222,13 +261,16 @@ Combine BIM schema knowledge with live data:
 
 ```
 PBI-AI-DevKit/
-+-- server.py               MCP server (26 tools, dual-mode)
++-- server.py               MCP server (27 tools, dual-mode)
 +-- ssas_client.py           Connection layer (local + remote + BIM)
 +-- bpa.py                   DAX Best Practice Analyzer (18 rules)
 +-- dependency_tracker.py    Measure dependency tracker
 +-- bim_reader.py            BIM file reader/writer
 +-- power_query.py           Power Query extraction module
 +-- power_query_ssas.py      Power Query SSAS reader
++-- report_parser.py         PBIX report layout parser
++-- dax_safe_modify.py       DAX modification safety utility
++-- pbix_safe.py             PBIX safe modification (anti-corruption)
 +-- setup.bat                One-click deployment
 +-- test_connection.py       Connection test
 +-- deploy.ps1               Auto-deployment script

@@ -27,7 +27,7 @@ the user asks to directly interact with an open PBIX file (reading/writing
 measures, DAX, tables, Power Query, relationships).
 
 The MCP server supports **dual-mode** connection:
-- **Local mode** (default): PBIX open in Power BI Desktop -> 26 tools, full read/write
+- **Local mode** (default): PBIX open in Power BI Desktop -> 27 tools, full read/write
 - **Remote mode** (auto-fallback): No PBIX open -> BIM schema + REST API, read-only DAX queries
 
 ---
@@ -40,7 +40,7 @@ The MCP server supports **dual-mode** connection:
 
 | `discover` output | Mode | Capabilities |
 |-------------------|------|--------------|
-| Shows local PBIX instances | **Local** | Full 26 tools: read + write + metadata + report |
+| Shows local PBIX instances | **Local** | Full 27 tools: read + write + metadata + report |
 | "No Power BI Desktop instances" + remote configured | **Remote** | Read-only: BIM metadata + REST API DAX queries |
 | Neither | **None** | Tell user to open PBIX or configure remote |
 

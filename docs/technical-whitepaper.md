@@ -1,6 +1,6 @@
 # Technical Whitepaper: Power BI + AI Assistant Integration
 
-> PBI AI DevKit — Power BI AI Development Toolkit for Claude Code | July 2026 (v1.2)
+> PBI AI DevKit — Power BI AI Development Toolkit for Claude Code | July 2026 (v1.4.3)
 
 ---
 
@@ -8,7 +8,7 @@
 
 This document compares the technical paths for AI assistants (Claude Code, ChatGPT/Copilot) to interact with Power BI data models. It analyzes the architecture, capability boundaries, and applicable scenarios of each approach, and explains the technical decisions behind building our own PBI AI DevKit.
 
-**v1.2 additions:** Remote REST API connection, BIM-driven remote queries, dual-mode connection strategy.
+**v1.4.3 additions:** PBIX safe modification, DAX change safety preview, report layout parsing, Live Connection PBIX support, bim-driven remote queries, dual-mode connection strategy.
 
 ---
 
@@ -69,6 +69,8 @@ Released by Microsoft in 2026, with two variants:
 - Node.js ecosystem dependency, extra setup for Python users
 - Full-text DAX search and Power Query audit not in scope
 - No DAX best practice analysis, no dependency tracking
+- No report layout parsing (semantic model only)
+- No DAX change safety preview
 
 ### 3.2 Community Solutions
 
@@ -82,7 +84,7 @@ Multiple community Power BI MCP implementations exist, all based on:
 
 ### 3.3 ChatGPT/Copilot Integration
 
-ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI REST API and XMLA endpoints. These capabilities are bound to their respective ecosystems and unavailable to Claude Code users.
+ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI REST API and XMLA endpoints. These capabilities are tied to their respective ecosystems and cannot fully meet our actual business scenario needs.
 
 ---
 
@@ -97,10 +99,10 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 |    v                                            |
 |  server.py (Python 3.11)                       |
 |    +-- MCP Protocol Layer (hand-written)        |
-|    +-- 26 tool definitions                      |
+|    +-- 27 tool definitions                      |
 |    +-- Tool Handler Dispatcher                  |
 |         |                                        |
-|    +----+--------------------------+            |
+|    +----+--------------------------+------------+
 |    |    |                          |            |
 |    v    v                          v            |
 |  ssas_client.py   bpa.py    dependency_        |
@@ -110,6 +112,14 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 |    v                               v            |
 |  power_query_ssas.py      bim_reader.py         |
 |  (DMV Partition)          (BIM JSON)            |
+|    |                                            |
+|    v                                            |
+|  report_parser.py    dax_safe_modify.py         |
+|  (PBIX Layout)       (DAX change preview)       |
+|    |                                            |
+|    v                                            |
+|  pbix_safe.py                                   |
+|  (anti-corruption)                              |
 |    |                                            |
 |    v                                            |
 |  pythonnet (CLR Bridge)                        |
@@ -149,6 +159,9 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 | Remote Metadata | BIM file | JSON schema cache when DMV unavailable |
 | Connection Strategy | Local-first, remote-fallback | Max capability when PBIX is open, graceful degradation |
 | Authentication | None (local) / MSAL (remote) | No auth for localhost; username/password for cloud |
+| Report Parsing | PBIX ZIP + JSON layout | Pages, visuals, field bindings, slicers, filters |
+| DAX Change Safety | Comment scope + bracket validation | Prevents accidental // comment corruption, bracket mismatch |
+| PBIX Modification | Config-string replacement | Avoids Layout JSON escaping corruption |
 
 ### 4.3 Tool Inventory
 
@@ -180,6 +193,7 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 | 24 | `get_report_structure` | PBIX zip parsing: pages, visuals, field bindings | Read |
 | 25 | `get_report_measures` | Report measure usage + BIM cross-check | Read |
 | 26 | `get_report_field_usage` | Impact analysis: measure/column -> page/visual | Read |
+| 27 | `validate_dax_change` | DAX modification preview: comment scope + bracket check | Read |
 
 ---
 
@@ -401,7 +415,7 @@ _get_connection(mode="auto")
   |
   +-- mode="auto" (default)
       +-- 1. Local PBIX found? -> Local mode (ADOMD.NET)
-      |     +-- All 26 tools available
+      |     +-- All 27 tools available
       +-- 2. No local, remote configured? -> Remote mode
       |     +-- BIM configured? -> RemotePowerBIWithSchema
       |     +-- No BIM? -> RemotePowerBI (DAX only)
@@ -441,6 +455,10 @@ _get_connection(mode="auto")
 | Model topology | Yes | No | **Yes** |
 | DAX BPA (18 rules) | N/A | No | **Yes** |
 | Dependency tracking | N/A | No | **Yes** |
+| Report layout parsing | N/A | No | **Yes** |
+| Report measure audit | N/A | No | **Yes** |
+| DAX change safety preview | N/A | No | **Yes** |
+| PBIX safe modification | N/A | No | **Yes** |
 | Auto-discovery | Yes | Manual | **Zero-config** |
 | Auth | Varies | Azure AD | **None / MSAL** |
 | Runtime | Node.js 20+ | Python | Python |
@@ -457,6 +475,8 @@ _get_connection(mode="auto")
 | DAX full-text search | **This Project** |
 | DAX code quality review | **This Project** |
 | Measure impact analysis | **This Project** |
+| Report layout analysis | **This Project** |
+| Report vs model cross-check | **This Project** |
 | Power Query audit | **This Project** |
 | Offline environment | **This Project** |
 | Python environment preference | **This Project** |
@@ -478,7 +498,7 @@ _get_connection(mode="auto")
 |    |   |   +-- Found -> Local mode (ADOMD.NET)           |
 |    |   |   |   +-- Read: DMV ($SYSTEM.TMSCHEMA_*)       |
 |    |   |   |   +-- Write: TOM (model.SaveChanges)       |
-|    |   |   |   +-- All 26 tools available               |
+|    |   |   |   +-- All 27 tools available               |
 |    |   |   +-- Not found -> Step 2                       |
 |    |   |                                                |
 |    |   +-- Step 2: check remote config                  |
@@ -579,8 +599,8 @@ This is the `QueryDefinition` column in the SSAS DMV partitions table, containin
 |--------|-------|
 | Total files | 90+ |
 | Code volume | ~550 KB |
-| Tools | 26 |
-| Core modules | 6 (ssas_client, bpa, dependency_tracker, bim_reader, power_query_ssas, RemotePowerBI) |
+| Tools | 27 |
+| Core modules | 9 (ssas_client, bpa, dependency_tracker, bim_reader, power_query_ssas, RemotePowerBI, report_parser, dax_safe_modify, pbix_safe) |
 | BPA rules | 18 (extensible) |
 | Skill workflows | 12 |
 | Test suites | 31 |
@@ -596,19 +616,22 @@ This is the `QueryDefinition` column in the SSAS DMV partitions table, containin
 | DAX optimization (model graph/context pre-check/channel analysis) | 4h |
 | BPA + Dependency Tracker (development + integration + testing) | 4h |
 | Remote connection (REST API + BIM + dual-mode + MSAL auth) | 4h |
-| **Total** | **~32h** |
+| Report parsing (layout parser + 3 tools + Live Connection) | 4h |
+| DAX safety (validate_dax_change + pbix_safe) | 4h |
+| Documentation & release | 4h |
+| **Total** | **~44h** |
 
 ### Cost Equivalents
 
 | Item | Estimate |
 |------|----------|
-| Developer time | 32h x internal hourly rate |
+| Developer time | 44h x internal hourly rate |
 | Claude Code Token | 5 days of intensive conversation |
-| Equivalent outsourcing | 23 tools + 5 docs + 31 tests ~ 80-120h x $100-150/h = **$8,000-$18,000** |
+| Equivalent outsourcing | 27 tools + 7 docs + 42 tests ~ 100-160h x $100-150/h = **$10,000-$24,000** |
 | vs Official solution | No Entra ID setup, no Node.js environment |
 
 ### Core Value
 
 - **Zero marginal cost distribution** -- one-prompt deployment for teammates
-- **Ecosystem gap filled** -- only Python MCP with TOM write + BPA + dependency tracking
+- **Ecosystem gap filled** -- only Python MCP with TOM write + BPA + dependency tracking + report parsing + PBIX safe modification
 - **Reusable** -- applicable to any Power BI Desktop project

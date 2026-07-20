@@ -23,11 +23,20 @@ As of July 2026, there are three main paths for AI assistants to interact with P
 | Read model metadata | Yes | Yes | Yes |
 | Modify Measures | Yes (TMDL) | No | **Yes (TOM)** |
 | Create/Delete Measures | Yes | No | **Yes** |
+| Create tables/columns | Yes | No | **Yes** |
 | Execute DAX queries | Yes | Yes | Yes |
 | Full-text DAX search | Not mentioned | Partial | **Full-text** |
 | Power Query audit | Not mentioned | No | **Yes** |
+| Relationship management | Yes | No | **Yes** |
+| Security roles | Yes | No | **Yes** |
+| Transactional batch | Yes | No | **Yes** |
+| Model topology graph | Yes | No | **Yes** |
 | DAX best practice analysis | Not mentioned | No | **Yes (18 rules)** |
-| Measure dependency tracking | Not mentioned | No | **Yes** |
+| Measure dependency tracking | Not mentioned | No | **Yes (fwd/rev/cycles)** |
+| Report layout parsing | No | No | **Yes (pages/visuals/fields)** |
+| Report measure usage audit | No | No | **Yes (+ BIM cross-check)** |
+| DAX change safety preview | Not mentioned | No | **Yes** |
+| PBIX safe modification | Not mentioned | No | **Yes (anti-corruption)** |
 | Remote DAX queries | Yes | No | **Yes (REST API)** |
 | BIM-driven remote queries | Not mentioned | No | **Yes** |
 | Local/remote dual-mode | Yes | No | **Yes (local-first)** |
@@ -120,6 +129,21 @@ Add to your `.mcp.json`:
 > "What will break if I change the 'Total Sales' measure?"
 > -> Forward dependencies, backward impact, transitive effects
 
+### Analyze Report Structure
+
+> "Which measures are used on the 'Sales Overview' page?"
+> -> Lists all visuals, fields, and measure bindings on that page
+
+### Cross-Check Report vs Model
+
+> "Are there any unused measures in this report?"
+> -> BIM cross-check against report layout, identifies dead code
+
+### Preview DAX Changes Safely
+
+> "Preview what happens if I replace 'LY' with 'PY' in all measures."
+> -> Detects comment-scope conflicts, bracket mismatches, before any write
+
 ### Query Remote Models
 
 > "Show me this year's sales by product category."
@@ -127,7 +151,7 @@ Add to your `.mcp.json`:
 
 ---
 
-## 23 Tools
+## 27 Tools
 
 | Category | Tools |
 |----------|-------|
@@ -136,9 +160,10 @@ Add to your `.mcp.json`:
 | Search | `search_dax`, `audit_power_query` |
 | Query | `run_dax`, `validate_dax` |
 | Analysis | `bpa_analyze`, `dependency_analyze` |
+| Report | `get_report_structure`, `get_report_measures`, `get_report_field_usage` |
 | Export | `export_model_snapshot`, `get_power_query` |
 | Create | `create_measure`, `create_table`, `create_column`, `create_relationship` |
-| Modify | `replace_in_measure` |
+| Modify | `replace_in_measure`, `validate_dax_change` |
 | Delete | `delete_measure` |
 | Batch | `batch_operations` |
 
@@ -160,11 +185,24 @@ Add to your `.mcp.json`:
 
 ---
 
+## Recent Updates
+
+See [CHANGELOG.md](CHANGELOG.md) for full history.
+
+| Version | Date | Highlights |
+|---------|------|------------|
+| **1.4.3** | 2026-07-14 | PBIX safe modification (`pbix_safe.py`), anti-corruption |
+| **1.4.2** | 2026-07-13 | DAX change safety preview (`validate_dax_change`) |
+| **1.4.0** | 2026-07-13 | Report layout parsing — 3 new tools |
+| **1.2.0** | 2026-07-13 | Remote REST API, BIM-driven queries, dual-mode connection |
+
+---
+
 ## Technical Info
 
 | Item | Detail |
 |------|--------|
-| Version | 1.2.0 |
+| Version | 1.4.3 |
 | License | MIT |
 | Python | 3.11+ |
 | Dependencies | pythonnet, msal, Power BI Desktop |
@@ -175,13 +213,16 @@ Add to your `.mcp.json`:
 ## File Structure
 
 ```
-+-- server.py               MCP server (26 tools, dual-mode)
++-- server.py               MCP server (27 tools, dual-mode)
 +-- ssas_client.py           Connection layer (local + remote + BIM)
 +-- bpa.py                   DAX Best Practice Analyzer (18 rules)
 +-- dependency_tracker.py    Measure dependency tracker
 +-- bim_reader.py            BIM file reader/writer
 +-- power_query.py           Power Query extraction
 +-- power_query_ssas.py      Power Query SSAS reader
++-- report_parser.py         PBIX report layout parser
++-- dax_safe_modify.py       DAX modification safety utility
++-- pbix_safe.py             PBIX safe modification (anti-corruption)
 +-- setup.bat                One-click deployment
 +-- deploy.ps1               Auto-deployment script
 +-- requirements.txt

@@ -1,6 +1,6 @@
 # 技术白皮书：Power BI 与 AI 助手的集成方案对比
 
-> PBI AI DevKit — Power BI AI Development Toolkit for Claude Code | 2026-07 (v1.2)
+> PBI AI DevKit — Power BI AI Development Toolkit for Claude Code | 2026-07 (v1.4.3)
 
 ---
 
@@ -8,7 +8,7 @@
 
 本文档对比了当前 AI 助手（Claude Code、ChatGPT/Copilot）与 Power BI 数据模型交互的技术路径，分析了各方案的架构、能力边界和适用场景，并阐述了我们自建 PBI AI DevKit 的技术决策依据。
 
-**v1.2 新增：** 远程 REST API 连接、BIM 文件驱动的远程查询、双模式连接策略。
+**v1.4.3 新增：** PBIX 安全修改、DAX 修改安全预览、报表 Layout 解析、Live Connection PBIX 支持、远程 REST API 连接、BIM 文件驱动的远程查询、双模式连接策略。
 
 ---
 
@@ -96,7 +96,7 @@ ChatGPT 和 GitHub Copilot 通过 Microsoft 官方插件直接调用 Power BI RE
 |    v                                             |
 |  server.py (Python 3.11)                         |
 |    +-- MCP Protocol (hand-written)               |
-|    +-- 26 tools defined                          |
+|    +-- 27 tools defined                          |
 |    +-- Tool Handler Dispatcher                   |
 |         |                                        |
 |    +----+--------------------------+             |
@@ -179,6 +179,7 @@ ChatGPT 和 GitHub Copilot 通过 Microsoft 官方插件直接调用 Power BI RE
 | 24 | `get_report_structure` | PBIX zip 解析: 页面、视觉对象、字段绑定 | 读 |
 | 25 | `get_report_measures` | 报表 Measure 使用情况 + BIM 交叉对比 | 读 |
 | 26 | `get_report_field_usage` | 影响分析: measure/column -> 页面/视觉对象 | 读 |
+| 27 | `validate_dax_change` | DAX 修改预览: 注释范围 + 括号校验 | 读 |
 
 ---
 
@@ -379,7 +380,7 @@ _get_connection(mode="auto")
   |
   +-- mode="auto" (default)
       +-- 1. Local PBIX found? -> Local mode (ADOMD.NET)
-      |     +-- All 26 tools available
+      |     +-- All 27 tools available
       +-- 2. No local, remote configured? -> Remote mode
       |     +-- BIM configured? -> RemotePowerBIWithSchema
       |     +-- No BIM? -> RemotePowerBI (DAX only)
@@ -482,7 +483,7 @@ $SYSTEM.TMSCHEMA_PARTITIONS.QueryDefinition
 |------|------|
 | 总文件数 | 90+ |
 | 代码量 | ~550 KB |
-| 工具数 | 26 |
+| 工具数 | 27 |
 | 核心模块 | 6 (ssas_client, bpa, dependency_tracker, bim_reader, power_query_ssas, RemotePowerBI) |
 | BPA 规则 | 18 (可扩展) |
 | Skill 工作流 | 12 |

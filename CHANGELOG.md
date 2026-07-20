@@ -4,6 +4,16 @@ All notable changes to the PBI AI DevKit project.
 
 ---
 
+## [1.4.3] - 2026-07-14
+
+### Added
+- **`pbix_safe.py`**: PBIX Safe Modification Utility. Uses config-string replacement to avoid Layout JSON corruption. Auto-backup before save. Prevents the `json.dumps` Layout escaping bug.
+
+### Fixed
+- **PBIX corruption bug**: `json.dumps` on entire Layout JSON changes Power BI's original JSON escaping format, causing "file is corrupted" error. Fixed by replacing only the config string in the raw Layout text.
+
+---
+
 ## [1.4.2] - 2026-07-13
 
 ### Added
