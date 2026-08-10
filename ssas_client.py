@@ -57,10 +57,8 @@ def acquire_token(server_url: str, force_refresh: bool = False,
                   username: str = None, password: str = None) -> str:
     """Acquire an Azure AD access token for Power BI XMLA.
 
-    Uses username/password authentication. Set PBI_USERNAME and
-    PBI_PASSWORD env vars, or pass them as arguments.
-
-    Token is cached to disk for reuse across sessions.
+    Uses username/password authentication. Falls back to device code
+    flow if no credentials are set. Token is cached to disk for reuse.
 
     Args:
         server_url: XMLA endpoint URL. Used to determine China vs Global cloud.
@@ -77,12 +75,6 @@ def acquire_token(server_url: str, force_refresh: bool = False,
     # Resolve credentials
     username = username or os.environ.get("PBI_USERNAME", "")
     password = password or os.environ.get("PBI_PASSWORD", "")
-
-    if not username or not password:
-        raise RuntimeError(
-            "Remote connection requires username and password.\n"
-            "Set PBI_USERNAME and PBI_PASSWORD environment variables."
-        )
 
     # Determine cloud based on server URL
     if 'api.powerbi.cn' in server_url or 'chinacloudapi.cn' in server_url:
@@ -104,23 +96,118 @@ def acquire_token(server_url: str, force_refresh: bool = False,
         authority=authority,
     )
 
-    result = app.acquire_token_by_username_password(
-        username=username,
-        password=password,
-        scopes=[scope],
-    )
+    # ── Method 1: Username/password ──
+    if username and password:
+        result = app.acquire_token_by_username_password(
+            username=username,
+            password=password,
+            scopes=[scope],
+        )
+        if "access_token" in result:
+            _save_token(result, scope)
+            return result['access_token']
+        raise RuntimeError(
+            f"Authentication failed: "
+            f"{result.get('error_description', result.get('error', 'Unknown'))}"
+        )
+
+    # ── Method 2: Device code fallback ──
+    flow = app.initiate_device_flow(scopes=[scope])
+    print(f"\nToken expired. Please authenticate:")
+    print(f"  1. Open: {flow['verification_uri']}")
+    print(f"  2. Enter code: {flow['user_code']}")
+    print(f"  Waiting for authentication...", file=sys.stderr)
+    sys.stderr.flush()
+
+    result = app.acquire_token_by_device_flow(flow)
 
     if "access_token" not in result:
         error = result.get("error_description", result.get("error", "Unknown"))
-        raise RuntimeError(f"Authentication failed: {error}")
+        raise RuntimeError(f"Device code authentication failed: {error}")
 
+    _save_token(result, scope)
+    return result['access_token']
+
+
+def _save_token(result: dict, scope: str):
+    """Save token result to disk cache."""
     data = {
         'access_token': result['access_token'],
         'expires_on': result.get('expires_on', time.time() + 3600),
         'scope': scope,
     }
     _save_token_cache(data)
-    return data['access_token']
+
+
+# ──────────────────────────────────────────────────────────────
+#  PBIX Path & Live Connection Detection
+# ──────────────────────────────────────────────────────────────
+
+def _extract_pbix_path() -> str | None:
+    """Extract the PBIX file path from the running PBIDesktop.exe process."""
+    try:
+        result = subprocess.run(
+            ["wmic", "process", "where", "name='PBIDesktop.exe'", "get", "CommandLine"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            if ".pbix" in line.lower():
+                # Command line looks like: "C:\...\PBIDesktop.exe" "D:\path\file.pbix"
+                match = re.search(r'"([^"]+\.pbix)"', line, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def _parse_connection_string(conn_str: str) -> dict:
+    """Parse a Power BI connection string to extract server and database."""
+    result = {"remote_server": "", "remote_database": ""}
+    # Parse "Data Source=...;Initial Catalog=...;..."
+    ds_match = re.search(r'Data Source\s*=\s*([^;]+)', conn_str, re.IGNORECASE)
+    if ds_match:
+        result["remote_server"] = ds_match.group(1).strip()
+    ic_match = re.search(r'Initial Catalog\s*=\s*([^;]+)', conn_str, re.IGNORECASE)
+    if ic_match:
+        result["remote_database"] = ic_match.group(1).strip()
+    return result
+
+
+def _read_pbix_connections(pbix_path: str) -> dict:
+    """Read the Connections file from a PBIX to detect live connection info.
+
+    Returns a dict with 'remote_server' and 'remote_database', or empty dict
+    if no live connection info is found.
+    """
+    try:
+        import zipfile
+        with zipfile.ZipFile(pbix_path, 'r') as zf:
+            if 'Connections' not in zf.namelist():
+                return {}
+            conn_data = json.loads(zf.read('Connections'))
+            connections = conn_data.get("Connections", [])
+            if not connections:
+                return {}
+            # Look for the first connection with a powerbi:// or Data Source
+            for conn in connections:
+                conn_str = conn.get("ConnectionString", "")
+                if not conn_str:
+                    # Some live connections use "RemoteArtifact" field
+                    remote = conn.get("RemoteArtifact", {})
+                    if remote:
+                        ws = remote.get("GroupId", "")
+                        ds = remote.get("DatasetId", "")
+                        if ws and ds:
+                            return {"remote_server": f"powerbi://api.powerbi.com/v1.0/myorg/{ws}",
+                                    "remote_database": ds}
+                # Try to parse connection string
+                parsed = _parse_connection_string(conn_str)
+                if parsed["remote_server"]:
+                    return parsed
+    except Exception:
+        pass
+    return {}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -197,7 +284,16 @@ from Microsoft.AnalysisServices.AdomdClient import (
 # ──────────────────────────────────────────────────────────────
 
 def discover_pbi_instances() -> list[dict]:
-    """Find running Power BI Desktop SSAS instances."""
+    """Find running Power BI Desktop SSAS instances.
+
+    Returns a list of dicts, each with:
+      - port: int          SSAS port number
+      - pid: int           Process ID
+      - title: str         PBIX window title (filename)
+      - pbix_path: str     Full path to the .pbix file
+      - remote_server: str Live connection server URL ("" if not a live connection)
+      - remote_database: str Live connection database name ("" if not a live connection)
+    """
     instances = []
 
     # Find msmdsrv processes
@@ -230,7 +326,8 @@ def discover_pbi_instances() -> list[dict]:
             port = int(match.group(1))
             pid = int(match.group(2))
             if pid in msmdsrv_pids:
-                instances.append({"port": port, "pid": pid})
+                instances.append({"port": port, "pid": pid, "title": "",
+                                   "pbix_path": "", "remote_server": "", "remote_database": ""})
 
     # Get PBI window titles
     try:
@@ -249,6 +346,17 @@ def discover_pbi_instances() -> list[dict]:
                         title_idx += 1
     except Exception:
         pass
+
+    # Get PBIX path from PBIDesktop command line
+    pbix_path = _extract_pbix_path()
+    if pbix_path and instances:
+        # Read live connection info from the PBIX
+        conn_info = _read_pbix_connections(pbix_path)
+        for inst in instances:
+            inst["pbix_path"] = pbix_path
+            if conn_info:
+                inst["remote_server"] = conn_info.get("remote_server", "")
+                inst["remote_database"] = conn_info.get("remote_database", "")
 
     return instances
 
@@ -270,7 +378,15 @@ def connect_to_remote(server: str, database: str = "") -> AdomdConnection:
     """
     token = acquire_token(server)
 
-    from System import DateTime
+    # Get expiration from cache for AccessToken constructor
+    cached = _get_cached_token()
+    expires_on = cached.get('expires_on', time.time() + 3600) if cached else time.time() + 3600
+
+    from System import DateTime, DateTimeOffset, TimeSpan
+
+    # Convert Unix timestamp to DateTimeOffset
+    dt = DateTime(1970, 1, 1).AddSeconds(expires_on)
+    dto = DateTimeOffset(dt, TimeSpan.Zero)
 
     conn_str = (
         f"Data Source={server};"
@@ -279,7 +395,7 @@ def connect_to_remote(server: str, database: str = "") -> AdomdConnection:
 
     conn = AdomdConnection()
     conn.ConnectionString = conn_str
-    conn.AccessToken = AccessToken(token)
+    conn.AccessToken = AccessToken(token, dto, None)
     conn.Open()
     return conn
 
@@ -287,6 +403,62 @@ def connect_to_remote(server: str, database: str = "") -> AdomdConnection:
 # ──────────────────────────────────────────────────────────────
 #  Remote REST API Client (Power BI Service)
 # ──────────────────────────────────────────────────────────────
+
+def _find_bim_file(database_name: str, search_roots: list = None) -> str:
+    """Auto-discover the best matching BIM file for a database.
+
+    Searches recursively in search_roots for .bim files, scores them
+    by keyword match against the database name, and returns the best
+    match (latest by modification time when scores are equal).
+
+    Args:
+        database_name: e.g. "SalesAndCrm - target_China_FG"
+        search_roots: directories to search; defaults to
+            [os.environ.get('PBI_BIM_SEARCH_PATH', r'D:\\LVMH_Max')]
+
+    Returns:
+        Path to best matching BIM file, or None if no match found.
+    """
+    if search_roots is None:
+        default_root = os.environ.get("PBI_BIM_SEARCH_PATH", r"D:\LVMH_Max")
+        search_roots = [default_root]
+
+    # Extract keywords from database name (lowercase, alphanumeric)
+    # "SalesAndCrm - target_China_FG" -> ["salesandcrm", "fendi", "china", "fg"]
+    keywords = re.findall(r'[a-zA-Z0-9]+', database_name.lower())
+    if not keywords:
+        return None
+
+    # Collect all .bim files with their match scores
+    candidates = []
+    for root in search_roots:
+        if not os.path.exists(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for f in filenames:
+                if not f.lower().endswith('.bim'):
+                    continue
+                full_path = os.path.join(dirpath, f)
+                name_lower = f.lower().replace('.bim', '')
+                # Count how many keywords match in the filename
+                match_count = sum(1 for kw in keywords if kw in name_lower)
+                if match_count > 0:
+                    mtime = os.path.getmtime(full_path)
+                    candidates.append((match_count, mtime, full_path))
+
+    if not candidates:
+        return None
+
+    # Sort by match count (desc), then by modification time (desc)
+    candidates.sort(key=lambda x: (-x[0], -x[1]))
+
+    best = candidates[0]
+    # Require at least 2 keyword matches for confidence
+    if best[0] < 2:
+        return None
+
+    return best[2]
+
 
 class RemotePowerBI:
     """Connect to Power BI Service via REST API for DAX queries.
@@ -299,7 +471,11 @@ class RemotePowerBI:
         self.server = server  # powerbi:// URL
         self.database = database  # Dataset name
         self._token = None
-        self._api_base = "https://api.powerbi.cn/v1.0/myorg"
+        # Detect cloud from server URL (same logic as acquire_token)
+        if 'api.powerbi.cn' in server or 'chinacloudapi.cn' in server:
+            self._api_base = "https://api.powerbi.cn/v1.0/myorg"
+        else:
+            self._api_base = "https://api.powerbi.com/v1.0/myorg"
         self._ws_id = None
         self._ds_id = None
         self._resolved = False
@@ -394,6 +570,21 @@ class RemotePowerBI:
         }
         r = requests.post(url, json=body, headers=self._headers(), timeout=60)
         if r.status_code != 200:
+            # Try to extract a meaningful error message from the response
+            try:
+                err = r.json()
+                detail = err.get("error", {}).get("details", [{}])
+                if detail and isinstance(detail, list) and len(detail) > 0:
+                    detail_msg = detail[0].get("detail", {}).get("message", "")
+                    if detail_msg:
+                        raise RuntimeError(f"DAX query failed: {detail_msg}")
+                msg = err.get("error", {}).get("message", "")
+                if msg:
+                    raise RuntimeError(f"DAX query failed: {msg}")
+            except RuntimeError:
+                raise
+            except (ValueError, KeyError, IndexError, TypeError):
+                pass
             raise RuntimeError(f"DAX query failed: {r.status_code} {r.text[:300]}")
 
         result = r.json()
@@ -443,6 +634,10 @@ class RemotePowerBI:
     def close(self):
         """No-op for REST API (stateless)."""
         pass
+
+    def Close(self):
+        """Alias for close() — matching server.py convention."""
+        self.close()
 
 
 class RemotePowerBIWithSchema(RemotePowerBI):
@@ -648,16 +843,61 @@ def list_databases(conn: AdomdConnection) -> list[str]:
 
 
 def get_database_name(conn: AdomdConnection) -> str:
-    """Get the database name from the connection."""
-    cmd = conn.CreateCommand()
-    cmd.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
-    reader = cmd.ExecuteReader()
+    """Get the database name from the connection.
+
+    For local PBI instances, tries TOM first (more reliable for local models),
+    then falls back to DMV. For live connection PBIX files, the DMV will
+    return an empty string.
+    """
     db_name = ""
-    if reader.Read():
-        val = reader[0]
-        db_name = str(val) if val is not None else ""
-    reader.Close()
+
+    # Try DMV query first (fast, no TOM overhead)
+    try:
+        cmd = conn.CreateCommand()
+        cmd.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
+        reader = cmd.ExecuteReader()
+        if reader.Read():
+            val = reader[0]
+            db_name = str(val) if val is not None else ""
+        reader.Close()
+    except Exception:
+        pass
+
+    # If DMV returns empty and we have a local port, try TOM
+    if not db_name:
+        try:
+            conn_str = conn.ConnectionString or ""
+            port_match = re.search(r'localhost:(\d+)', conn_str)
+            if port_match:
+                port = int(port_match.group(1))
+                db_name = _get_database_name_via_tom(port)
+        except Exception:
+            pass
+
+    if not db_name:
+        import sys
+        print("WARNING: Empty database — this PBIX is likely a live connection. "
+              "Use remote mode or set PBI_XMLA_SERVER.",
+              file=sys.stderr)
+
     return db_name
+
+
+def _get_database_name_via_tom(port: int) -> str:
+    """Get the database name using TOM (more reliable for local models)."""
+    import clr
+    clr.AddReference(str(PBI_BIN / "Microsoft.AnalysisServices.Server.Tabular.dll"))
+    clr.AddReference(str(PBI_BIN / "Microsoft.PowerBI.Tabular.dll"))
+    from Microsoft.AnalysisServices.Tabular import Server
+
+    server = Server()
+    try:
+        server.Connect(f"Data Source=localhost:{port};Catalog=")
+        if server.Databases.Count > 0:
+            return server.Databases[0].Name
+    finally:
+        server.Disconnect()
+    return ""
 
 
 # ──────────────────────────────────────────────────────────────
@@ -666,22 +906,32 @@ def get_database_name(conn: AdomdConnection) -> str:
 
 def execute_dmv(conn: AdomdConnection, query: str) -> list[dict]:
     """Execute a DMV query and return results as list of dicts."""
-    cmd = conn.CreateCommand()
-    cmd.CommandText = query
-    reader = cmd.ExecuteReader()
-    results = []
-    while reader.Read():
-        row = {}
-        for i in range(reader.FieldCount):
-            name = reader.GetName(i)
-            try:
-                val = reader[i]
-                row[name] = str(val) if val is not None else None
-            except Exception:
-                row[name] = None
-        results.append(row)
-    reader.Close()
-    return results
+    try:
+        cmd = conn.CreateCommand()
+        cmd.CommandText = query
+        reader = cmd.ExecuteReader()
+        results = []
+        while reader.Read():
+            row = {}
+            for i in range(reader.FieldCount):
+                name = reader.GetName(i)
+                try:
+                    val = reader[i]
+                    row[name] = str(val) if val is not None else None
+                except Exception:
+                    row[name] = None
+            results.append(row)
+        reader.Close()
+        return results
+    except Exception as e:
+        err_msg = str(e)
+        if "CurrentCatalog" in err_msg or "XML/A" in err_msg:
+            raise RuntimeError(
+                "Cannot query local model: this is a live connection PBIX. "
+                "The local SSAS instance has no database. "
+                "Use remote mode or set PBI_XMLA_SERVER env var."
+            ) from e
+        raise
 
 
 def execute_dax(conn: AdomdConnection, query: str) -> list[dict]:

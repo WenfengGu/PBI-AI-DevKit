@@ -1,12 +1,14 @@
 # Technical Whitepaper: Power BI + AI Assistant Integration
 
-> PBI AI DevKit — Power BI AI Development Toolkit for Claude Code | July 2026 (v1.4.3)
+> PBI AI DevKit — Power BI AI Development Toolkit for Claude Code | August 2026 (v1.7.1)
 
 ---
 
 ## 1. Abstract
 
 This document compares the technical paths for AI assistants (Claude Code, ChatGPT/Copilot) to interact with Power BI data models. It analyzes the architecture, capability boundaries, and applicable scenarios of each approach, and explains the technical decisions behind building our own PBI AI DevKit.
+
+**v1.7.1 additions:** BIM auto-discovery, remote mode crash fix (7 tools), graceful error handling.\n**v1.7.0 additions:** Live connection auto-detection & fallback, PBIX path auto-discovery, cloud environment auto-detection, DAX error message optimization, Unicode encoding compatibility.
 
 **v1.4.3 additions:** PBIX safe modification, DAX change safety preview, report layout parsing, Live Connection PBIX support, bim-driven remote queries, dual-mode connection strategy.
 
@@ -99,7 +101,7 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 |    v                                            |
 |  server.py (Python 3.11)                       |
 |    +-- MCP Protocol Layer (hand-written)        |
-|    +-- 27 tool definitions                      |
+|    +-- 25 tool definitions                      |
 |    +-- Tool Handler Dispatcher                  |
 |         |                                        |
 |    +----+--------------------------+------------+
@@ -156,7 +158,7 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 | DAX Analysis | Regex + bracket depth tracking | Pure Python static analysis, no SSAS connection needed |
 | Dependency Tracking | Graph theory (BFS/DFS) | Forward/reverse/transitive/cycle detection, topological sort |
 | Remote DAX | REST API executeQueries | Works with Power BI service datasets |
-| Remote Metadata | BIM file | JSON schema cache when DMV unavailable |
+| Remote Metadata | BIM file (auto-discovered) | JSON schema cache when DMV unavailable |
 | Connection Strategy | Local-first, remote-fallback | Max capability when PBIX is open, graceful degradation |
 | Authentication | None (local) / MSAL (remote) | No auth for localhost; username/password for cloud |
 | Report Parsing | PBIX ZIP + JSON layout | Pages, visuals, field bindings, slicers, filters |
@@ -169,10 +171,10 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 |---|------|-----------|:---:|
 | 1 | `discover` | netstat + tasklist | Read |
 | 2 | `get_model_info` | DMV / BIM + REST API | Read |
-| 3 | `get_tables` | DMV / BIM file | Read |
-| 4 | `get_measures` | DMV / BIM file | Read |
-| 5 | `get_columns` | DMV / BIM file | Read |
-| 6 | `search_dax` | DMV / BIM file + Python filter | Read |
+| 3 | `get_tables` | DMV / auto-discovered BIM | Read |
+| 4 | `get_measures` | DMV / auto-discovered BIM | Read |
+| 5 | `get_columns` | DMV / auto-discovered BIM | Read |
+| 6 | `search_dax` | DMV / auto-discovered BIM + Python filter | Read |
 | 7 | `run_dax` | ADOMD.NET / REST API | Read |
 | 8 | `replace_in_measure` | TOM: Measure.Expression | Write |
 | 9 | `get_power_query` | DMV: TMSCHEMA_PARTITIONS.QueryDefinition | Read |
@@ -190,10 +192,8 @@ ChatGPT and GitHub Copilot use Microsoft's official plugins to call Power BI RES
 | 21 | `get_model_graph` | DMV: tables+columns+relationships topology | Read |
 | 22 | `bpa_analyze` | Python regex static analysis (18 rules) | Read |
 | 23 | `dependency_analyze` | Python graph theory (BFS/DFS + topological) | Read |
-| 24 | `get_report_structure` | PBIX zip parsing: pages, visuals, field bindings | Read |
-| 25 | `get_report_measures` | Report measure usage + BIM cross-check | Read |
-| 26 | `get_report_field_usage` | Impact analysis: measure/column -> page/visual | Read |
-| 27 | `validate_dax_change` | DAX modification preview: comment scope + bracket check | Read |
+| 24 | `report_analyze` | Unified report analysis: structure/measures/field_usage modes | Read |
+| 25 | `validate_dax_change` | DAX modification preview: comment scope + bracket check | Read |
 
 ---
 
@@ -322,7 +322,8 @@ ssas_client.py
 |   +-- list_datasets() -> GET /groups/{id}/datasets
 |   +-- execute_dax() -> POST /datasets/{id}/executeQueries
 |
-+-- RemotePowerBIWithSchema (BIM-enhanced)
++-- RemotePowerBIWithSchema (BIM-enhanced, auto-discovered)
+    +-- _find_bim_file() -> Keyword matching auto-discovery
     +-- load_schema(bim_path) -> Parse BIM JSON
     +-- get_tables() / get_columns() / get_measures() -> BIM metadata
     +-- search_dax() -> BIM full-text search
@@ -369,7 +370,7 @@ The XMLA endpoint for Power BI China (21Vianet) remains under investigation:
 
 ### 8.1 Design Motivation
 
-REST API does not support metadata queries (DMV/INFO), but BIM files share the same table structure as the remote model. By combining BIM for metadata and REST API for data, we achieve full remote query capability.
+REST API does not support metadata queries (DMV/INFO), but BIM files share the same table structure as the remote model. By combining BIM for metadata and REST API for data, we achieve full remote query capability. BIM files are auto-discovered via keyword matching from the database name (v1.7.1), eliminating the need for manual `PBI_BIM_PATH` configuration.
 
 ### 8.2 Data Flow
 
@@ -415,10 +416,10 @@ _get_connection(mode="auto")
   |
   +-- mode="auto" (default)
       +-- 1. Local PBIX found? -> Local mode (ADOMD.NET)
-      |     +-- All 27 tools available
+      |     +-- All 25 tools available
       +-- 2. No local, remote configured? -> Remote mode
-      |     +-- BIM configured? -> RemotePowerBIWithSchema
-      |     +-- No BIM? -> RemotePowerBI (DAX only)
+      |     +-- BIM auto-discovered? -> RemotePowerBIWithSchema
+      |     +-- No BIM? -> RemotePowerBI (DAX only, metadata tools return guidance)
       +-- 3. Neither -> Error with guidance
 ```
 
@@ -498,7 +499,7 @@ _get_connection(mode="auto")
 |    |   |   +-- Found -> Local mode (ADOMD.NET)           |
 |    |   |   |   +-- Read: DMV ($SYSTEM.TMSCHEMA_*)       |
 |    |   |   |   +-- Write: TOM (model.SaveChanges)       |
-|    |   |   |   +-- All 27 tools available               |
+|    |   |   |   +-- All 25 tools available               |
 |    |   |   +-- Not found -> Step 2                       |
 |    |   |                                                |
 |    |   +-- Step 2: check remote config                  |
@@ -506,7 +507,7 @@ _get_connection(mode="auto")
 |    |       |   +-- Try XMLA (ADOMD.NET + token)         |
 |    |       |   |   +-- Success -> XMLA mode (rare)       |
 |    |       |   |   +-- Fail -> REST API fallback         |
-|    |       |   |       +-- PBI_BIM_PATH set?            |
+|    |       |   |       +-- BIM auto-discovered?          |
 |    |       |   |       |   +-- RemotePowerBIWithSchema  |
 |    |       |   |       +-- No BIM -> RemotePowerBI       |
 |    |       |   +-- Not set -> Error                      |
@@ -541,8 +542,10 @@ _get_connection(mode="auto")
 
 ```
 +------------------------------------------------------+
-|  RemotePowerBIWithSchema                             |
+|  RemotePowerBIWithSchema (auto-discovered BIM)           |
 |                                                      |
+|  _find_bim_file(database_name) -> keyword match       |
+|    v                                                 |
 |  load_schema(bim_path)                               |
 |    v                                                 |
 |  Parse BIM JSON -> Lookup Tables                      |
@@ -599,11 +602,11 @@ This is the `QueryDefinition` column in the SSAS DMV partitions table, containin
 |--------|-------|
 | Total files | 90+ |
 | Code volume | ~550 KB |
-| Tools | 27 |
+| Tools | 25 |
 | Core modules | 9 (ssas_client, bpa, dependency_tracker, bim_reader, power_query_ssas, RemotePowerBI, report_parser, dax_safe_modify, pbix_safe) |
 | BPA rules | 18 (extensible) |
 | Skill workflows | 12 |
-| Test suites | 31 |
+| Test suites | 65 |
 | Documentation | 5 documents |
 
 ### Time Investment
@@ -627,7 +630,7 @@ This is the `QueryDefinition` column in the SSAS DMV partitions table, containin
 |------|----------|
 | Developer time | 44h x internal hourly rate |
 | Claude Code Token | 5 days of intensive conversation |
-| Equivalent outsourcing | 27 tools + 7 docs + 42 tests ~ 100-160h x $100-150/h = **$10,000-$24,000** |
+| Equivalent outsourcing | 25 tools + 7 docs + 42 tests ~ 100-160h x $100-150/h = **$10,000-$24,000** |
 | vs Official solution | No Entra ID setup, no Node.js environment |
 
 ### Core Value

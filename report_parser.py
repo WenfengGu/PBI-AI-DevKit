@@ -329,7 +329,7 @@ class ReportParser:
             lines.append(f"### `{m}`")
             lines.append(f"Used in {len(usages)} visual(s) across {len(pages)} page(s):")
             for u in usages:
-                lines.append(f"- {u['page']} → [{u['visual']}] ({u['role']})")
+                lines.append(f"- {u['page']} -> [{u['visual']}] ({u['role']})")
             lines.append("")
 
         if cross_check and self.bim_measures:
@@ -355,14 +355,14 @@ class ReportParser:
         if m_usages:
             lines.append("## As Measure")
             for u in m_usages:
-                lines.append(f"- **{u['page']}** → [{u['visual']}] ({u['role']}): `{u['measure']}`")
+                lines.append(f"- **{u['page']}** -> [{u['visual']}] ({u['role']}): `{u['measure']}`")
 
         # Check columns
         c_usages = self.get_column_usage(field_name)
         if c_usages:
             lines.append("## As Column")
             for u in c_usages:
-                lines.append(f"- **{u['page']}** → [{u['visual']}] ({u['role']}): `{u['column']}`")
+                lines.append(f"- **{u['page']}** -> [{u['visual']}] ({u['role']}): `{u['column']}`")
 
         if not m_usages and not c_usages:
             lines.append("Not found in any page or visual.")

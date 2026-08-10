@@ -1,12 +1,14 @@
 # 技术白皮书：Power BI 与 AI 助手的集成方案对比
 
-> PBI AI DevKit — Power BI AI Development Toolkit for Claude Code | 2026-07 (v1.4.3)
+> PBI AI DevKit — Power BI AI Development Toolkit for Claude Code | 2026-08 (v1.7.1)
 
 ---
 
 ## 1. 摘要
 
 本文档对比了当前 AI 助手（Claude Code、ChatGPT/Copilot）与 Power BI 数据模型交互的技术路径，分析了各方案的架构、能力边界和适用场景，并阐述了我们自建 PBI AI DevKit 的技术决策依据。
+
+**v1.7.1 新增：** BIM 文件自动搜索、远程模式崩溃修复（7 个工具）、优雅的错误提示。\n**v1.7.0 新增：** Live Connection 自动检测与回退、PBIX 路径自动发现、云环境自动检测、DAX 错误信息优化、Unicode 编码兼容性修复。
 
 **v1.4.3 新增：** PBIX 安全修改、DAX 修改安全预览、报表 Layout 解析、Live Connection PBIX 支持、远程 REST API 连接、BIM 文件驱动的远程查询、双模式连接策略。
 
@@ -96,7 +98,7 @@ ChatGPT 和 GitHub Copilot 通过 Microsoft 官方插件直接调用 Power BI RE
 |    v                                             |
 |  server.py (Python 3.11)                         |
 |    +-- MCP Protocol (hand-written)               |
-|    +-- 27 tools defined                          |
+|    +-- 25 tools defined                          |
 |    +-- Tool Handler Dispatcher                   |
 |         |                                        |
 |    +----+--------------------------+             |
@@ -145,7 +147,7 @@ ChatGPT 和 GitHub Copilot 通过 Microsoft 官方插件直接调用 Power BI RE
 | DAX 分析 | 正则 + 括号深度追踪 | 纯 Python 静态分析，无需 SSAS 连接 |
 | 依赖追踪 | 图论 (BFS/DFS) | 正向/反向/传递/环形检测，支持拓扑排序 |
 | 远程 DAX | REST API executeQueries | 直接查询 Power BI 云端数据集 |
-| 远程元数据 | BIM 文件 | DMV 不可用时的 JSON schema 缓存 |
+| 远程元数据 | BIM 文件（自动发现） | DMV 不可用时的 JSON schema 缓存 |
 | 连接策略 | 本地优先，远程兜底 | 打开 PBIX 时全能力，关闭时远程降级 |
 | 认证 | 无 (本地) / MSAL (远程) | localhost 无需认证；云端用用户名密码 |
 
@@ -155,10 +157,10 @@ ChatGPT 和 GitHub Copilot 通过 Microsoft 官方插件直接调用 Power BI RE
 |---|------|----------|:---:|
 | 1 | `discover` | netstat + tasklist | 读 |
 | 2 | `get_model_info` | DMV / BIM + REST API | 读 |
-| 3 | `get_tables` | DMV / BIM 文件 | 读 |
-| 4 | `get_measures` | DMV / BIM 文件 | 读 |
-| 5 | `get_columns` | DMV / BIM 文件 | 读 |
-| 6 | `search_dax` | DMV / BIM 文件 + Python 过滤 | 读 |
+| 3 | `get_tables` | DMV / 自动发现 BIM | 读 |
+| 4 | `get_measures` | DMV / 自动发现 BIM | 读 |
+| 5 | `get_columns` | DMV / 自动发现 BIM | 读 |
+| 6 | `search_dax` | DMV / 自动发现 BIM + Python 过滤 | 读 |
 | 7 | `run_dax` | ADOMD.NET / REST API | 读 |
 | 8 | `replace_in_measure` | TOM: Measure.Expression | 写 |
 | 9 | `get_power_query` | DMV: TMSCHEMA_PARTITIONS.QueryDefinition | 读 |
@@ -176,10 +178,8 @@ ChatGPT 和 GitHub Copilot 通过 Microsoft 官方插件直接调用 Power BI RE
 | 21 | `get_model_graph` | DMV: 表+列+关系 拓扑图 | 读 |
 | 22 | `bpa_analyze` | Python 正则静态分析 (18 条规则) | 读 |
 | 23 | `dependency_analyze` | Python 图论 (BFS/DFS + 拓扑排序) | 读 |
-| 24 | `get_report_structure` | PBIX zip 解析: 页面、视觉对象、字段绑定 | 读 |
-| 25 | `get_report_measures` | 报表 Measure 使用情况 + BIM 交叉对比 | 读 |
-| 26 | `get_report_field_usage` | 影响分析: measure/column -> 页面/视觉对象 | 读 |
-| 27 | `validate_dax_change` | DAX 修改预览: 注释范围 + 括号校验 | 读 |
+| 24 | `report_analyze` | 统一报表分析: structure/measures/field_usage 三种模式 | 读 |
+| 25 | `validate_dax_change` | DAX 修改预览: 注释范围 + 括号校验 | 读 |
 
 ---
 
@@ -308,7 +308,8 @@ ssas_client.py
 |   +-- list_datasets() -> GET /groups/{id}/datasets
 |   +-- execute_dax() -> POST /datasets/{id}/executeQueries
 |
-+-- RemotePowerBIWithSchema (BIM 增强)
++-- RemotePowerBIWithSchema (BIM 增强，自动发现)
+    +-- _find_bim_file() -> 关键词匹配自动发现
     +-- load_schema(bim_path) -> 解析 BIM JSON
     +-- get_tables() / get_columns() / get_measures() -> BIM 元数据
     +-- search_dax() -> BIM 全文搜索
@@ -346,7 +347,7 @@ POST /executeQueries -> 200 OK (DAX 查询结果)
 
 ### 8.1 设计动机
 
-REST API 不支持元数据查询 (DMV/INFO)，但 BIM 文件与远程模型共享相同的表结构。通过 BIM 文件提供元数据、REST API 提供数据，实现完整的远程查询能力。
+REST API 不支持元数据查询 (DMV/INFO)，但 BIM 文件与远程模型共享相同的表结构。通过 BIM 文件提供元数据、REST API 提供数据，实现完整的远程查询能力。BIM 文件通过数据库名关键词自动匹配发现（v1.7.1），无需手动配置 `PBI_BIM_PATH`。
 
 ### 8.2 数据流
 
@@ -380,10 +381,10 @@ _get_connection(mode="auto")
   |
   +-- mode="auto" (default)
       +-- 1. Local PBIX found? -> Local mode (ADOMD.NET)
-      |     +-- All 27 tools available
+      |     +-- All 25 tools available
       +-- 2. No local, remote configured? -> Remote mode
-      |     +-- BIM configured? -> RemotePowerBIWithSchema
-      |     +-- No BIM? -> RemotePowerBI (DAX only)
+      |     +-- BIM auto-discovered? -> RemotePowerBIWithSchema
+      |     +-- No BIM? -> RemotePowerBI (DAX only, metadata tools return guidance)
       +-- 3. Neither -> Error with guidance
 ```
 
@@ -483,11 +484,11 @@ $SYSTEM.TMSCHEMA_PARTITIONS.QueryDefinition
 |------|------|
 | 总文件数 | 90+ |
 | 代码量 | ~550 KB |
-| 工具数 | 27 |
+| 工具数 | 25 |
 | 核心模块 | 6 (ssas_client, bpa, dependency_tracker, bim_reader, power_query_ssas, RemotePowerBI) |
 | BPA 规则 | 18 (可扩展) |
 | Skill 工作流 | 12 |
-| 测试套件 | 31 |
+| 测试套件 | 65 |
 | 文档 | 5 份 |
 
 ### 时间投入

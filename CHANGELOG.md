@@ -4,6 +4,50 @@ All notable changes to the PBI AI DevKit project.
 
 ---
 
+## [1.7.1] - 2026-08-11
+
+### Fixed
+- **Remote mode crash**: `get_tables`, `get_measures`, `get_columns`, `search_dax`, `bpa_analyze`, `dependency_analyze`, `get_relationships` all crashed with `AttributeError: 'RemotePowerBI' object has no attribute 'CreateCommand'` when running in remote-only mode (no local PBIX). Root cause: `RemotePowerBI` lacked metadata methods, and `_connect_remote()` only used `RemotePowerBIWithSchema` when `PBI_BIM_PATH` was explicitly set.
+- **`RemotePowerBI.Close()` missing**: `finally` blocks in tool handlers called `conn.Close()` which didn't exist on `RemotePowerBI`, causing secondary `AttributeError` that masked the original error.
+
+### Added
+- **`_find_bim_file(database_name, search_roots)`** in `ssas_client.py`: Auto-discovers the best matching BIM file by extracting keywords from the database name and scoring `.bim` files in the search path. Returns the latest matching file by modification time.
+- **`RemotePowerBI.Close()`** method: Alias for existing `close()` to match the convention used in `server.py` exception handlers.
+- **`_no_bim_error(tool_name, database)`** helper in `server.py`: Returns a friendly error message when BIM schema is unavailable for a remote tool, guiding users to export and place a BIM file.
+
+### Changed
+- **`_connect_remote()`** now auto-searches for BIM files when `PBI_BIM_PATH` is not set. Uses `_find_bim_file()` to match the database name against `.bim` files in `D:\LVMH_Max\` (configurable via `PBI_BIM_SEARCH_PATH` env var).
+- **Tool handlers** (`get_tables`, `get_measures`, `get_columns`, `search_dax`, `bpa_analyze`, `dependency_analyze`, `get_relationships`): Added graceful error handling for remote-without-BIM case instead of crashing with DMV errors.
+- **`bpa_analyze` and `dependency_analyze`**: Now support remote mode via BIM schema data, not just local DMV queries.
+
+---
+
+## [1.7.0] - 2026-07-23
+
+### Added
+- **Live Connection Auto-Detection & Auto-Fallback**: `_get_connection()` in `server.py` now detects when a local PBIX is a live connection (thin report) and automatically falls back to remote mode using the connection info from the PBIX's `Connections` file. No more cryptic "CurrentCatalog XML/A property was not specified" errors.
+- **`_extract_pbix_path()`** helper in `ssas_client.py`: Extracts the PBIX file path from the running PBIDesktop.exe process command line via `wmic`.
+- **`_read_pbix_connections()`** helper in `ssas_client.py`: Reads the `Connections` file from inside a PBIX ZIP to detect live connection details (remote server URL, database name).
+- **`_parse_connection_string()`** helper in `ssas_client.py`: Parses Power BI connection strings to extract `Data Source` and `Initial Catalog`.
+- **`_get_database_name_via_tom()`** helper in `ssas_client.py`: Gets the database name via TOM for local models (more reliable than DMV when catalog is properly set).
+- **`_clean_column_name()`** helper in `server.py`: Strips `[Table].[Column]` prefix from column names in `run_dax` output, showing just `Column`.
+- **`discover` tool** now shows `pbix_path`, live connection status, and remote server/database info for each local instance.
+
+### Changed
+- **`discover_pbi_instances()`** now returns `pbix_path`, `remote_server`, and `remote_database` fields in each instance dict.
+- **`get_database_name()`** now tries TOM first for local models, falls back to DMV, and logs a clear warning for empty databases (live connections).
+- **`RemotePowerBI.__init__()`** now detects cloud (China vs Global) from the server URL instead of hardcoding `api.powerbi.cn`.
+- **`RemotePowerBI.execute_dax()`** now parses HTTP 400 JSON responses to extract just the `DetailsMessage` instead of dumping the full JSON blob.
+- **`execute_dmv()`** now catches `CurrentCatalog` XML/A errors and re-raises with a clear message about live connections.
+- **Report Parser** formatting methods now use ASCII `->` instead of Unicode `→` for Windows terminal compatibility.
+- **Report tools unified**: `get_report_structure`, `get_report_measures`, `get_report_field_usage` merged into single `report_analyze` tool with `mode` parameter (structure/measures/field_usage). Total tools: 27 → 25.
+
+### Fixed
+- **`.mcp.json`** server path corrected from `C:\Users\user\` to `d:\LVMH_Max\`.
+- **Live connection write errors**: `mode="write"` now gives a clear error message when the PBIX is a live connection (no local database).
+
+---
+
 ## [1.4.3] - 2026-07-14
 
 ### Added
@@ -18,10 +62,10 @@ All notable changes to the PBI AI DevKit project.
 
 ### Added
 - **`dax_safe_modify.py`**: DAX modification safety utility with defensive checks (comment scope detection, bracket validation, human confirmation)
-- **`validate_dax_change`** (MCP tool #27): preview DAX modifications before applying, detects // comment scope and bracket mismatches
+- **`validate_dax_change`** (MCP tool): preview DAX modifications before applying, detects // comment scope and bracket mismatches
 
 ### Changed
-- Total MCP tools: 26 -> 27
+- Total MCP tools: 26 -> 27 (later unified to 25 in v1.7.0)
 
 ---
 
@@ -41,12 +85,10 @@ All notable changes to the PBI AI DevKit project.
 
 ### Added
 - **`report_parser.py`** — new module for parsing PBIX report layouts (pages, visuals, field/measure bindings, slicers, filters)
-- **`get_report_structure`** (MCP tool #24) — extract complete report layout: pages, visuals, fields, measures
-- **`get_report_measures`** (MCP tool #25) — list measures actually used in report, with optional BIM cross-check for unused measures
-- **`get_report_field_usage`** (MCP tool #26) — find which pages/visuals use a specific measure or column (impact analysis)
+- **`report_analyze`** (MCP tool) — unified report analysis with three modes: `structure` (pages/visuals), `measures` (usage + BIM cross-check), `field_usage` (impact analysis)
 
 ### Changed
-- Total MCP tools: 23 → 26
+- Total MCP tools: 23 → 24 (later 27, then unified to 25 in v1.7.0)
 - `build_release.py` now includes `report_parser.py`
 
 ---

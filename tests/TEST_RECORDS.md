@@ -1,6 +1,6 @@
 # Test Records -- PBI AI DevKit
 
-> Target: Local PBIX + BIM + Remote Power BI Cloud | Date: 2026-07-08 ~ 2026-07-12
+> Target: Local PBIX + BIM + Remote Power BI Cloud | Date: 2026-07-08 ~ 2026-07-14
 
 ---
 
@@ -17,7 +17,7 @@
 | 7 | `create_measures.py` | Create 3 measures via TOM | 3 created |
 | 8 | `fix_measures.py` | Fix + recreate with correct logic | 3 fixed |
 
-**Total: 32 tests, 32 passed**
+**Total: 35 tests, 35 passed**
 
 ---
 
@@ -328,9 +328,63 @@ All 32 tables' Power Query M code is readable through the SSAS connection.
 - `server.py`: `_get_connection()` 5-tuple, XMLA->REST fallback
 - `.mcp.json`: added remote XMLA + credentials config
 
+### Phase 13: Live Connection Auto-Detection & First-User Feedback (2026-07-23, v1.7.0)
+
+| # | Change | Purpose | Impact |
+|---|--------|---------|:---:|
+| 43 | `_extract_pbix_path()` | Extract PBIX path from PBIDesktop.exe command line | New helper |
+| 44 | `_read_pbix_connections()` | Read Connections file from PBIX ZIP for live connection detection | New helper |
+| 45 | `_parse_connection_string()` | Parse Power BI connection strings (Data Source, Initial Catalog) | New helper |
+| 46 | `discover_pbi_instances()` enriched | Returns `pbix_path`, `remote_server`, `remote_database` | Enhanced |
+| 47 | `_get_connection()` auto-fallback | Detects empty database -> auto-fallback to remote via PBIX connection info | Critical fix |
+| 48 | `RemotePowerBI` cloud detection | Auto-detects China vs Global cloud from server URL | Fixed |
+| 49 | `execute_dax()` error parsing | Extracts `DetailsMessage` from HTTP 400 JSON | Improved UX |
+| 50 | `get_database_name()` TOM fallback | TOM-first for local models, warns on empty database | Enhanced |
+| 51 | `execute_dmv()` error messages | Catches CurrentCatalog XMLA errors with clear message | Improved UX |
+| 52 | `report_parser.py` Unicode fix | `→` -> `->` for Windows cp1252 compatibility | Fixed |
+| 53 | `run_dax` column name cleanup | Strips `[Table].[Column]` prefix via `_clean_column_name()` | Improved UX |
+| 54 | `discover` tool output | Shows PBIX path, live connection status, remote server/database | Enhanced |
+
+**Live Connection Auto-Fallback Flow:**
+1. `discover_pbi_instances()` finds PBIX path from PBIDesktop.exe command line
+2. Opens PBIX as ZIP, reads `Connections` file, extracts `remote_server` and `remote_database`
+3. `_get_connection()` in auto mode: connects to local SSAS -> `get_database_name()` returns empty
+4. Checks instance dict for `remote_server` -> auto-falls back to `_connect_remote()`
+5. Logs: "Live connection detected -> auto-fallback to remote: powerbi://.../DatasetName"
+6. If no connection info found, gives clear error: "This PBIX is a live connection. Set PBI_XMLA_SERVER."
+
+**Total: 54 test suites / changes tracked**
+
+### Phase 14: BIM Auto-Discovery & Remote Mode Crash Fix (2026-08-11, v1.7.1)
+
+| # | Change | Purpose | Impact |
+|---|--------|---------|:---:|
+| 55 | `_find_bim_file()` | Auto-discover BIM file by keyword matching database name | New helper |
+| 56 | `RemotePowerBI.Close()` | Add Close() method to prevent AttributeError in finally blocks | Fixed |
+| 57 | `_connect_remote()` BIM auto-search | Fallback to `_find_bim_file()` when PBI_BIM_PATH not set | Enhanced |
+| 58 | `get_tables` remote guard | Graceful error when remote without BIM instead of crash | Fixed |
+| 59 | `get_measures` remote guard | Graceful error when remote without BIM instead of crash | Fixed |
+| 60 | `get_columns` remote guard | Graceful error when remote without BIM instead of crash | Fixed |
+| 61 | `search_dax` remote guard | Graceful error when remote without BIM instead of crash | Fixed |
+| 62 | `bpa_analyze` remote support | Now works with BIM schema data, not just local DMV | Added |
+| 63 | `dependency_analyze` remote support | Now works with BIM schema data, not just local DMV | Added |
+| 64 | `get_relationships` remote support | Now works with BIM schema via `get_relationships()` | Added |
+| 65 | `_no_bim_error()` helper | Friendly error message guiding user to provide BIM file | New helper |
+
+**BIM Auto-Discovery Strategy:**
+1. Extract keywords from database name (e.g. `"SalesAndCrm - target_China_FG"` → `["salesandcrm","fendi","china","fg"]`)
+2. Recursively search `D:\LVMH_Max\` (configurable via `PBI_BIM_SEARCH_PATH`) for `.bim` files
+3. Score each file by keyword match count, then by modification time
+4. Return best match; require ≥2 keyword matches for confidence
+
+**Verification:**
+- All 11 tests passed (BIM discovery, get_tables 109, get_measures 1621, get_columns 90, search_dax 463, BPA, dependency, relationships 145, Close)
+
+**Total: 65 test suites / changes tracked**
+
 ---
 
-## Final Tools Summary (23 tools)
+## Final Tools Summary (25 tools)
 
 | Category | Tools |
 |----------|-------|
@@ -459,3 +513,93 @@ All 32 tables' Power Query M code is readable through the SSAS connection.
 | E | 4/4 | Cancelled Qty exceeds Ordered Qty since 2025 H2 (peak +61%) |
 | F | 6/6 | PRD lacks Digital channel entirely (14,225 rows missing) |
 | G | 4/4 | 27 measures fixed, 5.64M EUR recovered, 1 syntax error caught by defensive check |
+
+---
+
+## Phase 13: PBIX Safe Modification (v1.4.3)
+
+### Test #34: PBIX Layout JSON Escaping Bug
+
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | Read PBIX Layout as UTF-16 LE JSON | Layout text loaded, config is nested JSON string |
+| 2 | `json.loads` → modify config → `json.dumps(layout)` | PBIX corrupted: "file is corrupted or was created by an unrecognized version" |
+| 3 | Inspect raw Layout bytes | Config has 4-layer JSON escaping: `"Canceled"` → `\\\"Canceled\\\"` |
+| 4 | `json.dumps` changes escaping format | Root cause: Python `json.dumps` uses different escaping rules than Power BI |
+| 5 | Fix: replace only config string in raw text | `json.dumps(old_config)` → `json.dumps(new_config)` → `text.replace(old, new)` |
+| 6 | Verify PBIX opens | PBIX opens successfully |
+
+**Root Cause**: Power BI's Layout JSON has nested JSON escaping (config is a JSON string inside a JSON object). `json.dumps` on the entire Layout changes the escaping format, making the file unreadable by Power BI.
+
+**Fix**: `pbix_safe.py` module — replaces only the config string in the raw Layout text, preserving all other bytes.
+
+### Test #35: Retail Activations DQ Check (Full Playbook)
+
+| Phase | Tests | Result |
+|-------|-------|--------|
+| A | 3/3 | 11 pages, 131 report measures, Live Connection |
+| B | 3/3 | 131 measures NOT in BIM (expected), 11 columns NOT in BIM |
+| C | 5/5 | Campaign Period NULL: BOFS 99.96%, RTB 99.94% |
+| D | 4/4 | Canceled/CANCELLED coexistence, Flag Campaign Period BLANK 100% |
+| E | 4/4 | 1,258 campaigns, 8 types, RTB 253.6M EUR |
+| F | 6/6 | DEV vs PRD: BIM SQL version mismatch, max dates match after refresh |
+| G | 4/4 | 29 measures fixed (Canceled 22, DIVIDE 3, RTB case 4) |
+
+### Test #36: Preselling DQ Update — Flag Exchange Revert
+
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | Revert Flag Exchange ISBLANK from 9 measures | Restored to original `IN {"false","No Exchange"}` |
+| 2 | Compare against origin PBIX | 12/12 Flag Exchange measures match |
+| 3 | Re-apply all other fixes to origin | Cancel 24, DIVIDE 7, SWITCH 11, Case 3 |
+| 4 | Apply UPPER to Cancel + hardcoded | 24 Cancel + 27 hardcoded + 18 BLANK→ISBLANK |
+| 5 | Safe save via config replacement | PBIX opens successfully |
+
+## Key Learnings (Updated)
+
+22. **PBIX Layout JSON has nested escaping** — config is a JSON string inside a JSON object. `json.dumps` changes Power BI's original escaping format, corrupting the file. Always use config-string replacement.
+23. **Always backup before PBIX modification** — `shutil.copy2` before any write, keep timestamped backups.
+24. **Use `SafePbixModifier` context manager** — auto-backup, safe config replacement, JSON validation.
+25. **Raw string replacement on Layout text** — use `chr(92)` + `chr(34)` to build patterns matching the exact escaping (e.g., `\\\"` = 3 backslashes + quote).
+26. **SUMMARIZECOLUMNS keys include table prefix** — REST API returns `TableName[ColumnName]` format, not `[ColumnName]`. Use `row_val()` or iterate keys.
+
+---
+
+## Phase 14: KPI Column Dependency Verification (2026-07-17)
+
+### Test #43: `test_kpi_dependency_book_appointment.py`
+
+| Suite | Purpose | Tests | Result |
+|-------|---------|:-----:|:------:|
+| Suite 1 | KPI Existence & DAX Dependency | 39 | 39/39 PASS |
+| Suite 2 | Page Usage Verification | 40 | 40/40 PASS |
+| Suite 3 | Unexpected Column Reference Detection | 2 | 2/2 PASS |
+| Suite 4 | Report Structure Integrity | 1 | 1/1 PASS |
+| **Total** | | **82** | **82/82 PASS** |
+
+**Target PBIX**: `Report Book Appointment_Atom CN.pbix` (Live Connection, 3 pages, 43 measures)
+
+**Test Coverage:**
+- 14 KPIs in BAA chain (Customer Active SID Code BAA): 1 DIRECT, 13 INDIRECT
+- 20 KPIs in IDCAMP chain (IDCAMPACTIVITY): 4 DIRECT, 16 INDIRECT
+- 6 KPIs in Other (Sold Qty): 1 DIRECT, 5 INDIRECT
+- 1 report-level measure (DAX in visual config, not in model)
+
+**Key Findings:**
+- `# BAA Converted Clients` is the sole DIRECT KPI for BAA column — all 13 derivatives wrap it
+- `_# of Appointments`, `# of Appointments Scheduled`, `_# of Appointments CheckedIn`, `# of Appointments Cancelled to Reschedule` are the 4 DIRECT KPIs for IDCAMP
+- `_switch` KPIs route to time-period variants based on user selection (WTD/MTD/YTD/CY)
+- `[Customer Active SID Code BAA]` never appears directly in any visual — only via DAX measures
+- `[IDCAMPACTIVITY]` appears both in measures AND as a raw column in the Detail tableEx
+
+**Test Script**: `tests/test_kpi_dependency_book_appointment.py`
+**Output Files**:
+- `Book Appointment_Atom CN - KPI Column Dependency Analysis.docx` (detailed analysis report)
+- `Book Appointment_Atom CN - KPI Usage Table.xlsx` (KPI matrix with group/dependency/page mapping)
+- `Book Appointment_Atom CN - KPI Usage Table.docx` (Word version of KPI table)
+
+**How to Run**:
+```bash
+cd PBI-AI-DevKit
+python tests/test_kpi_dependency_book_appointment.py
+```

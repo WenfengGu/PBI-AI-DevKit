@@ -26,8 +26,9 @@ You have access to the **PBI AI DevKit** tools. Use them whenever
 the user asks to directly interact with an open PBIX file (reading/writing
 measures, DAX, tables, Power Query, relationships).
 
-The MCP server supports **dual-mode** connection:
-- **Local mode** (default): PBIX open in Power BI Desktop -> 27 tools, full read/write
+The MCP server supports **dual-mode** connection with live connection auto-detection:
+- **Local mode** (default): PBIX open in Power BI Desktop -> 25 tools, full read/write
+- **Live Connection** (auto-fallback): Live connection PBIX open -> auto-detects remote server from PBIX, transparent fallback
 - **Remote mode** (auto-fallback): No PBIX open -> BIM schema + REST API, read-only DAX queries
 
 ---
@@ -40,7 +41,8 @@ The MCP server supports **dual-mode** connection:
 
 | `discover` output | Mode | Capabilities |
 |-------------------|------|--------------|
-| Shows local PBIX instances | **Local** | Full 27 tools: read + write + metadata + report |
+| Shows local PBIX instances with databases | **Local** | Full 25 tools: read + write + metadata + report |
+| Shows local PBIX instances + "No local database (live connection)" | **Live Connection** | Read-only: auto-fallback to remote using PBIX connection info |
 | "No Power BI Desktop instances" + remote configured | **Remote** | Read-only: BIM metadata + REST API DAX queries |
 | Neither | **None** | Tell user to open PBIX or configure remote |
 
@@ -120,31 +122,54 @@ When the user asks for DAX, distinguish between two different things:
 
 ## Available Tools
 
+### Discovery & Model Info
 | Tool | Use When |
 |------|----------|
 | `discover` | User asks "what PBI files are open?" |
 | `get_model_info` | User asks "tell me about this model" |
 | `get_tables` | User asks "what tables are in this model?" |
+| `get_model_graph` | User asks "show me the model topology" or "how is everything connected?" |
+
+### Measures & DAX
+| Tool | Use When |
+|------|----------|
 | `get_measures` | User asks "show me all measures" or "find measures with WTD in name" |
 | `get_columns` | User asks "what columns does the Calendar table have?" |
 | `search_dax` | User asks "which measures reference YEAR WEEK?" or "find all DAX with X" |
-| `run_dax` | User asks "run this DAX query" or "what does EVALUATE X return?" |
+| `run_dax` | User asks "run this DAX query" or "analyze June sales" |
+| `validate_dax` | User asks "is this DAX correct?" before creating a measure |
+| `validate_dax_change` | **MANDATORY before any DAX modification** — detects comment scope, bracket mismatches |
+
+### Modify
+| Tool | Use When |
+|------|----------|
 | `replace_in_measure` | User asks "fix this measure" or "replace X with Y in measure Z" |
-| `get_power_query` | User asks "show me the Power Query for this table" or "what M code is behind X?" |
-| `audit_power_query` | User asks "are there any Power Query optimizations?" or "audit my M code" |
-| `get_relationships` | User asks "how are tables connected?" or "show me the model relationships" |
-| `validate_dax` | User asks "is this DAX correct?" or "validate this expression before creating" |
-| `export_model_snapshot` | User asks "save a snapshot" or "export the model structure" |
-| `run_dax` (multi-query) | User asks "give me a performance summary" or "analyze June sales" |
 | `create_measure` | User asks "create a new measure" or "add a KPI" |
 | `delete_measure` | User asks "remove this measure" or "delete the test measure" |
-| `get_roles` | User asks "show me security roles" or "what RLS is configured?" |
-| `create_table` | User asks "create a new table" |
+| `create_table` | User asks "create a new calculated table" |
 | `create_column` | User asks "add a column to this table" |
-| `batch_operations` | User asks "do multiple changes at once" or "batch create these measures" |
-| `get_report_structure` | User asks "what pages/visuals are in this report?" or "show me the report layout" |
-| `get_report_measures` | User asks "which measures are actually used in the report?" or "find unused measures" |
-| `get_report_field_usage` | User asks "which visuals use this measure?" or "impact analysis before changing X" |
+| `create_relationship` | User asks "connect these two tables" |
+| `batch_operations` | User asks "do multiple changes at once" — transactional with rollback |
+
+### Power Query
+| Tool | Use When |
+|------|----------|
+| `get_power_query` | User asks "show me the Power Query M code for this table" |
+| `audit_power_query` | User asks "audit my Power Query for optimization" |
+
+### Analysis & Quality
+| Tool | Use When |
+|------|----------|
+| `bpa_analyze` | User asks "check my DAX for best practices" — 18 rules |
+| `dependency_analyze` | **MANDATORY before modifying any measure** — forward/backward/circular deps |
+| `get_relationships` | User asks "how are tables connected?" |
+| `get_roles` | User asks "show me security roles" or "what RLS is configured?" |
+| `export_model_snapshot` | User asks "save a snapshot" or "export the model structure" |
+
+### Report
+| Tool | Use When |
+|------|----------|
+| `report_analyze` | Unified report analysis. `mode=structure` for pages/visuals, `mode=measures` for usage + cross-check, `mode=field_usage` for impact analysis |
 
 ---
 
@@ -344,28 +369,28 @@ User: "Give me a summary of June 2026 sales performance"
 
 ### 5. Report Layout Analysis (v1.4.0+)
 
-**Use `get_report_structure` when the user asks:**
+**Use `report_analyze` (mode=structure) when the user asks:**
 - "What pages are in this report?"
 - "What visuals are on each page?"
 - "Show me the report layout"
 
-**Use `get_report_measures` when the user asks:**
+**Use `report_analyze` (mode=measures) when the user asks:**
 - "Which measures are actually used in the report?"
 - "Are there unused measures I can clean up?"
 - Cross-check with `cross_check: true` + `bim_path` to find BIM-only measures
 
-**Use `get_report_field_usage` when the user asks:**
+**Use `report_analyze` (mode=field_usage) when the user asks:**
 - "Which visuals use this measure?" (impact analysis before modification)
 - "Where is this column referenced in the report?"
 - "What will break if I change X?"
 
 **IMPORTANT — Live Connection PBIX Measures:**
 - Live Connection PBIX files can define report-level measures in `modelExtensions` (stored in the PBIX Layout JSON, NOT in the BIM)
-- Use `report_parser.py --report-measures` to extract their DAX
+- Use `report_analyze` (mode=measures) to extract their DAX
 - If BIM cross-check shows "missing" measures, check `modelExtensions` first before concluding BIM is stale
 
 **Report Cleanup Workflow:**
-1. Run `get_report_measures` with `cross_check: true` to find measures in BIM but NOT in any report visual
+1. Run `report_analyze` (mode=measures) with `cross_check: true` to find measures in BIM but NOT in any report visual
 2. Focus on measures outside `KPI_Curr` and `Measure` tables (those are shared calculation tables)
 3. Present the top 20-30 unused measures grouped by table
 4. Confirm with user before deleting any measure

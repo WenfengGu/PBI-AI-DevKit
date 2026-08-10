@@ -41,6 +41,7 @@ from ssas_client import (
     execute_dmv,
     execute_dax,
     replace_in_measure,
+    _find_bim_file,
 )
 from power_query_ssas import (
     get_power_query_m_code,
@@ -52,34 +53,36 @@ from report_parser import ReportParser, VISUAL_LABELS, SKIP_TYPES
 from dax_safe_modify import DaxModifier
 
 SERVER_NAME = "powerbi-model"
-SERVER_VERSION = "1.2.0"
-
+SERVER_VERSION = "1.7.1"
 
 # ──────────────────────────────────────────────────────────────
 #  MCP Protocol
 # ──────────────────────────────────────────────────────────────
 
 def read_message() -> dict | None:
-    """Read a JSON-RPC message from stdin using MCP framing.
-    Uses binary mode to avoid text-mode buffering issues.
+    """Read a JSON-RPC message from stdin. Supports both:
+    - Content-Length framed (MCP classic): Content-Length: N\r\n\r\n{body}
+    - Newline-delimited JSON (MCP streamable): {body}\n
     """
     try:
-        # Read headers as bytes until \r\n\r\n
-        header_bytes = b""
-        while True:
-            ch = sys.stdin.buffer.read(1)
-            if not ch:
-                return None  # EOF
-            header_bytes += ch
-            if header_bytes.endswith(b"\r\n\r\n"):
-                break
+        # Read first line to determine framing
+        first_line = sys.stdin.buffer.readline()
+        if not first_line:
+            return None  # EOF
 
-        # Parse Content-Length from headers
+        first_line = first_line.rstrip(b"\r\n")
+
+        # Newline-delimited JSON: first line is the JSON body
+        if first_line.startswith(b"{"):
+            return json.loads(first_line.decode("utf-8"))
+
+        # Content-Length framing: parse headers
         content_length = None
-        header_text = header_bytes.decode("utf-8")
-        for line in header_text.split("\r\n"):
-            if line.lower().startswith("content-length:"):
-                content_length = int(line.split(":", 1)[1].strip())
+        line = first_line
+        while line:
+            if line.lower().startswith(b"content-length:"):
+                content_length = int(line.split(b":", 1)[1].strip())
+            line = sys.stdin.buffer.readline().rstrip(b"\r\n")
 
         if content_length is None:
             log.warning("No Content-Length header found")
@@ -87,12 +90,10 @@ def read_message() -> dict | None:
 
         # Read body bytes
         body_bytes = sys.stdin.buffer.read(content_length)
-        body = body_bytes.decode("utf-8")
-        return json.loads(body)
+        return json.loads(body_bytes.decode("utf-8"))
     except Exception as e:
         log.error(f"Read error: {e}")
         return None
-
 
 def send_message(msg: dict):
     """Send a JSON-RPC message to stdout using MCP framing."""
@@ -102,17 +103,14 @@ def send_message(msg: dict):
     sys.stdout.buffer.write(header + body_bytes)
     sys.stdout.buffer.flush()
 
-
 def send_response(req_id, result):
     send_message({"jsonrpc": "2.0", "id": req_id, "result": result})
-
 
 def send_error(req_id, code, message, data=None):
     err = {"code": code, "message": message}
     if data is not None:
         err["data"] = data
     send_message({"jsonrpc": "2.0", "id": req_id, "error": err})
-
 
 # ──────────────────────────────────────────────────────────────
 #  Tool Definitions
@@ -121,16 +119,15 @@ def send_error(req_id, code, message, data=None):
 TOOLS = [
     {
         "name": "discover",
-        "description": "Discover running Power BI Desktop instances with their SSAS ports.",
+        "description": "Discover running PBI Desktop instances with SSAS ports.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "get_model_info",
-        "description": "Get overall model information: database name, tables, measures, columns count.",
+        "description": "Get model summary: database name, table/measure/column counts.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"}
             },
         },
     },
@@ -140,19 +137,17 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"}
             },
         },
     },
     {
         "name": "get_measures",
-        "description": "Get all measures from the model. Returns name, table, DAX expression, display folder, and error message.",
+        "description": "Get all measures with name, table, DAX expression, display folder.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "table_filter": {"type": "string", "description": "Filter by table name (substring match)"},
-                "name_filter": {"type": "string", "description": "Filter by measure name (substring match, case-insensitive)"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "table_filter": {"type": "string", "description": "Filter by table name"},
+                "name_filter": {"type": "string", "description": "Filter by measure name"},
             },
         },
     },
@@ -163,20 +158,18 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "table": {"type": "string", "description": "Table name (exact match)"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
             "required": ["table"],
         },
     },
     {
         "name": "search_dax",
-        "description": "Search within all measure DAX expressions for a pattern. Find measures that reference specific columns, tables, or functions.",
+        "description": "Search all measure DAX expressions for a pattern.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Text to search for in DAX expressions"},
-                "case_sensitive": {"type": "boolean", "description": "Case sensitive search (default: false)"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "pattern": {"type": "string", "description": "Search pattern in DAX"},
+                "case_sensitive": {"type": "boolean", "description": "Case sensitive (default: false)"},
             },
             "required": ["pattern"],
         },
@@ -188,255 +181,219 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "DAX query (EVALUATE ...)"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
             "required": ["query"],
         },
     },
     {
         "name": "replace_in_measure",
-        "description": "Replace text in a measure's DAX expression. Useful for renaming column references across multiple measures.",
+        "description": "Replace text in a measure's DAX expression.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "table_name": {"type": "string", "description": "Table name containing the measure"},
-                "measure_name": {"type": "string", "description": "Exact measure name"},
-                "old_text": {"type": "string", "description": "Text to replace in the DAX expression"},
+                "table_name": {"type": "string", "description": "Table name"},
+                "measure_name": {"type": "string", "description": "Measure name"},
+                "old_text": {"type": "string", "description": "Text to replace"},
                 "new_text": {"type": "string", "description": "Replacement text"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
             "required": ["table_name", "measure_name", "old_text", "new_text"],
         },
     },
     {
         "name": "get_power_query",
-        "description": "Read the Power Query (M language) code for a specific table. Returns the full M code, step count, source type, and complexity score.",
+        "description": "Read Power Query M code for a table. Returns code, step count, complexity score.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "table": {"type": "string", "description": "Table name (exact match). If omitted, returns all tables."},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "table": {"type": "string", "description": "Table name (exact match)"},
             },
         },
     },
     {
         "name": "audit_power_query",
-        "description": "Audit all Power Query M code in the model for optimization opportunities: query folding, duplicate patterns, high complexity, and more.",
+        "description": "Audit Power Query M code for optimization: query folding, duplicates, complexity.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
         },
     },
     {
         "name": "get_relationships",
-        "description": "Get all relationships between tables in the model. Shows from/to table/column, active status, and cross-filter direction.",
+        "description": "Get all table relationships with columns, active status, cross-filter direction.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
         },
     },
     {
         "name": "validate_dax",
-        "description": "Validate a DAX expression without creating a measure. Returns whether the expression is valid and any error details.",
+        "description": "Validate a DAX expression without creating a measure.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "expression": {"type": "string", "description": "DAX expression to validate"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "expression": {"type": "string", "description": "DAX expression"},
             },
             "required": ["expression"],
         },
     },
     {
         "name": "export_model_snapshot",
-        "description": "Export a lightweight JSON snapshot of the model: tables, measures (with DAX), relationships, and summary statistics. Useful for audit trails and change tracking.",
+        "description": "Export model JSON snapshot: tables, measures with DAX, relationships, summary.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
         },
     },
     {
         "name": "create_measure",
-        "description": "Create a new measure in the model. Specify table name, measure name, DAX expression, and optional display folder and format string.",
+        "description": "Create a new measure with table, name, DAX expression, optional display folder and format.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "table_name": {"type": "string", "description": "Table to add the measure to"},
-                "measure_name": {"type": "string", "description": "Name of the new measure"},
-                "expression": {"type": "string", "description": "DAX expression for the measure"},
-                "display_folder": {"type": "string", "description": "Optional display folder"},
-                "format_string": {"type": "string", "description": "Optional format string (e.g. '#,0')"},
-                "description": {"type": "string", "description": "Optional description"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "table_name": {"type": "string", "description": "Table name"},
+                "measure_name": {"type": "string", "description": "Measure name"},
+                "expression": {"type": "string", "description": "DAX expression"},
+                "display_folder": {"type": "string", "description": "Display folder"},
+                "format_string": {"type": "string", "description": "Format string (e.g. '#,0')"},
+                "description": {"type": "string", "description": "Description"},
             },
             "required": ["table_name", "measure_name", "expression"],
         },
     },
     {
         "name": "delete_measure",
-        "description": "Delete a measure from the model. Requires confirmation of the exact measure name and table.",
+        "description": "Delete a measure by table and name.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "table_name": {"type": "string", "description": "Table containing the measure"},
-                "measure_name": {"type": "string", "description": "Exact measure name to delete"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "measure_name": {"type": "string", "description": "Measure name"},
             },
             "required": ["table_name", "measure_name"],
         },
     },
     {
         "name": "get_roles",
-        "description": "Get all security roles defined in the model, including their members and table-level filter permissions.",
+        "description": "Get security roles with members and table filter permissions.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
         },
     },
     {
         "name": "create_relationship",
-        "description": "Create a new relationship between two columns in different tables. The model will validate and reject if it creates ambiguity.",
+        "description": "Create a relationship between two columns in different tables.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "from_table": {"type": "string", "description": "Source table name"},
-                "from_column": {"type": "string", "description": "Source column name"},
-                "to_table": {"type": "string", "description": "Target table name"},
-                "to_column": {"type": "string", "description": "Target column name"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "from_table": {"type": "string", "description": "Source table"},
+                "from_column": {"type": "string", "description": "Source column"},
+                "to_table": {"type": "string", "description": "Target table"},
+                "to_column": {"type": "string", "description": "Target column"},
             },
             "required": ["from_table", "from_column", "to_table", "to_column"],
         },
     },
     {
         "name": "create_table",
-        "description": "Create a new calculated table with a simple ROW expression. The table will have an auto-generated RowNumber column. Use create_measure to add measures to the new table.",
+        "description": "Create a calculated table with ROW expression.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "table_name": {"type": "string", "description": "Name of the new table"},
+                "table_name": {"type": "string", "description": "Table name"},
                 "expression": {"type": "string", "description": "M expression for the table partition (e.g. ROW(\"Col1\", \"Value\"))"},
-                "description": {"type": "string", "description": "Optional description"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "description": {"type": "string", "description": "Description"},
             },
             "required": ["table_name", "expression"],
         },
     },
     {
         "name": "create_column",
-        "description": "Add a new column to an existing table.",
+        "description": "Add a column to an existing table.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "table_name": {"type": "string", "description": "Table to add the column to"},
-                "column_name": {"type": "string", "description": "Name of the new column"},
-                "data_type": {"type": "string", "description": "Data type: String, Int64, Double, Boolean, DateTime, Decimal"},
-                "source_column": {"type": "string", "description": "Source column name (defaults to column_name)"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "table_name": {"type": "string", "description": "Table name"},
+                "column_name": {"type": "string", "description": "Column name"},
+                "data_type": {"type": "string", "description": "Data type: String/Int64/Double/Boolean/DateTime/Decimal"},
+                "source_column": {"type": "string", "description": "Source column (defaults to column_name)"},
             },
             "required": ["table_name", "column_name", "data_type"],
         },
     },
     {
         "name": "batch_operations",
-        "description": "Execute multiple operations in a single transaction. If any operation fails, all changes are rolled back. Supports: create_measure, delete_measure, replace_in_measure, create_table, create_column, delete_table.",
+        "description": "Execute multiple operations in a single transaction with rollback.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "operations": {
                     "type": "array",
-                    "description": "List of operations to execute. Each operation has: action (create_measure/delete_measure/replace_in_measure), table_name, measure_name, and other action-specific params.",
+                    "description": "List of operations with action, table_name, measure_name, and params",
                     "items": {"type": "object"}
                 },
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
             "required": ["operations"],
         },
     },
     {
         "name": "get_model_graph",
-        "description": "Get the complete model topology in one call: all tables with their columns, plus all relationships with cross-filter directions. Use this BEFORE writing any DAX involving multiple tables.",
+        "description": "Get model topology: all tables with columns, relationships with cross-filter directions.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
             },
         },
     },
     {
         "name": "bpa_analyze",
-        "description": "Run DAX Best Practice Analyzer on all measures. Checks for: DIVIDE without alternative, EARLIER patterns, nested IF > 3 levels, SWITCH without else, redundant CALCULATE, FILTER/VALUES patterns, iterator over large tables, long expressions, hardcoded values, missing format strings, ISFILTERED in measures, and more. Returns a report with errors, warnings, and suggestions.",
+        "description": "Run DAX Best Practice Analyzer: DIVIDE, SWITCH, redundant CALCULATE, hardcoded values, and more. Returns errors/warnings/suggestions.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "table_filter": {"type": "string", "description": "Filter by table name (substring match)"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "table_filter": {"type": "string", "description": "Filter by table name"},
             },
         },
     },
     {
         "name": "dependency_analyze",
-        "description": "Analyze measure dependencies: forward deps (what does this measure depend on?), backward deps/impact analysis (what depends on this measure?), circular dependency detection, orphan measures, most-used measures, and topological ordering. Use this BEFORE modifying or deleting any measure to understand the impact.",
+        "description": "Analyze measure dependencies: forward, backward, circular, orphans, most-used. Use before modifying any measure.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "measure_name": {"type": "string", "description": "Measure name to analyze (optional — if omitted, returns full graph summary)"},
-                "table": {"type": "string", "description": "Table containing the measure (optional, helps disambiguate)"},
-                "port": {"type": "integer", "description": "SSAS port (auto-discover if omitted)"},
+                "measure_name": {"type": "string", "description": "Measure name (optional)"},
+                "table": {"type": "string", "description": "Table name (optional)"},
             },
         },
     },
     {
-        "name": "get_report_structure",
-        "description": "Parse a PBIX file to extract report layout: pages, visuals, and their field/measure bindings. Supports both PBIX file path and already-extracted Layout JSON file.",
+        "name": "report_analyze",
+        "description": "Analyze PBIX report: structure, measures, or field usage.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "pbix_path": {"type": "string", "description": "Path to PBIX file or extracted Layout JSON file. Auto-discovers local PBIX if omitted."},
-                "page": {"type": "string", "description": "Filter to a specific page name (substring match)"},
+                "mode": {"type": "string", "description": "structure | measures | field_usage"},
+                "pbix_path": {"type": "string", "description": "Path to PBIX or Layout JSON (auto-discover)"},
+                "page": {"type": "string", "description": "Filter by page (mode=structure)"},
+                "cross_check": {"type": "boolean", "description": "Cross-check BIM for unused measures (mode=measures)"},
+                "bim_path": {"type": "string", "description": "Path to BIM file (mode=measures)"},
+                "field_name": {"type": "string", "description": "Measure/column name (mode=field_usage)"},
             },
-        },
-    },
-    {
-        "name": "get_report_measures",
-        "description": "List all measures actually used in the report. Optionally cross-check with BIM file to find measures that exist in the model but are NOT used in any report visual.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "pbix_path": {"type": "string", "description": "Path to PBIX file or Layout JSON. Auto-discovers local PBIX if omitted."},
-                "cross_check": {"type": "boolean", "description": "Cross-check with BIM to find unused measures. Requires PBI_BIM_PATH env var or model BIM file."},
-                "bim_path": {"type": "string", "description": "Path to BIM file for cross-check (overrides PBI_BIM_PATH env var)"},
-            },
-        },
-    },
-    {
-        "name": "get_report_field_usage",
-        "description": "Find which pages and visuals use a specific measure or column. Useful for impact analysis before modifying a measure.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "field_name": {"type": "string", "description": "Measure or column name to search for (substring match)"},
-                "pbix_path": {"type": "string", "description": "Path to PBIX file or Layout JSON. Auto-discovers local PBIX if omitted."},
-            },
-            "required": ["field_name"],
+            "required": ["mode"],
         },
     },
     {
         "name": "validate_dax_change",
-        "description": "Safely preview a DAX modification before applying it. Detects comment scope, bracket mismatches, and other issues. Always use this before modifying any DAX expression.",
+        "description": "Preview DAX modification: detect comment scope, bracket mismatches. Use before any DAX change.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "expression": {"type": "string", "description": "Current DAX expression"},
-                "old_text": {"type": "string", "description": "Text to replace in the expression"},
+                "old_text": {"type": "string", "description": "Text to replace"},
                 "new_text": {"type": "string", "description": "Replacement text"},
             },
             "required": ["expression", "old_text", "new_text"],
@@ -454,7 +411,9 @@ def _get_connection(port: int = None, mode: str = "auto"):
     Returns (conn, port, db, title, is_remote).
 
     Modes:
-      - "auto": local first, remote fallback if local unavailable
+      - "auto": local first, remote fallback if local unavailable.
+                 Also auto-detects live connection PBIX files and falls back
+                 to remote using the connection info from the PBIX.
       - "local": force local (fail if no PBIX open)
       - "remote": force remote (fail if no remote config)
       - "write": local only, fail if remote (for write operations)
@@ -462,6 +421,20 @@ def _get_connection(port: int = None, mode: str = "auto"):
     remote_server = os.environ.get("PBI_XMLA_SERVER", "")
     remote_db = os.environ.get("PBI_XMLA_DATABASE", "")
     bim_path = os.environ.get("PBI_BIM_PATH", "")
+
+    def _check_live_connection(conn, inst, close_conn=True):
+        """Check if a local connection is actually a live connection.
+        Returns (is_live, remote_server, remote_database).
+        """
+        db = get_database_name(conn)
+        if db == "" and inst.get("remote_server", ""):
+            if close_conn:
+                try:
+                    conn.Close()
+                except Exception:
+                    pass
+            return True, inst["remote_server"], inst["remote_database"]
+        return False, "", ""
 
     # ── Force remote ──
     if mode == "remote":
@@ -474,6 +447,16 @@ def _get_connection(port: int = None, mode: str = "auto"):
         if port:
             conn = connect_to_instance(port)
             db = get_database_name(conn)
+            if db == "":
+                try:
+                    conn.Close()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "This PBIX is a live connection (no local database). "
+                    "Write operations are not supported for live connections. "
+                    "Use auto mode or remote mode to query the remote dataset."
+                )
             return conn, port, db, "", False
         instances = discover_pbi_instances()
         if not instances:
@@ -487,6 +470,17 @@ def _get_connection(port: int = None, mode: str = "auto"):
             try:
                 conn = connect_to_instance(inst["port"])
                 db = get_database_name(conn)
+                if db == "":
+                    try:
+                        conn.Close()
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"This PBIX '{inst.get('title', '')}' is a live connection "
+                        f"(no local database). Write operations are not supported for "
+                        f"live connections. Use auto mode or remote mode to query "
+                        f"the remote dataset."
+                    )
                 return conn, inst["port"], db, inst.get("title", ""), False
             except Exception as e:
                 pass
@@ -497,7 +491,37 @@ def _get_connection(port: int = None, mode: str = "auto"):
         try:
             conn = connect_to_instance(port)
             db = get_database_name(conn)
+            if db == "":
+                # Check if we can detect live connection info
+                instances = discover_pbi_instances()
+                for inst in instances:
+                    if inst.get("port") == port and inst.get("remote_server", ""):
+                        log.info(
+                            f"Live connection detected at port {port} "
+                            f"-> auto-fallback to remote: "
+                            f"{inst['remote_server']}/{inst['remote_database']}"
+                        )
+                        try:
+                            conn.Close()
+                        except Exception:
+                            pass
+                        return _connect_remote(
+                            inst["remote_server"],
+                            inst["remote_database"],
+                            bim_path,
+                        )
+                try:
+                    conn.Close()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "This PBIX is a live connection (no local database). "
+                    "Could not auto-detect remote server. "
+                    "Set PBI_XMLA_SERVER and PBI_XMLA_DATABASE env vars."
+                )
             return conn, port, db, "", False
+        except RuntimeError:
+            raise
         except Exception:
             pass
 
@@ -508,23 +532,73 @@ def _get_connection(port: int = None, mode: str = "auto"):
             try:
                 conn = connect_to_instance(inst["port"])
                 db = get_database_name(conn)
+                if db == "" and inst.get("remote_server", ""):
+                    # Live connection detected — auto-fallback to remote
+                    log.info(
+                        f"Live connection detected: '{inst.get('title', '')}' "
+                        f"-> auto-fallback to remote: "
+                        f"{inst['remote_server']}/{inst['remote_database']}"
+                    )
+                    try:
+                        conn.Close()
+                    except Exception:
+                        pass
+                    return _connect_remote(
+                        inst["remote_server"],
+                        inst["remote_database"],
+                        bim_path,
+                    )
+                if db == "":
+                    errors.append(
+                        f"Port {inst['port']}: "
+                        f"Live connection (no local database). "
+                        f"Could not auto-detect remote server."
+                    )
+                    try:
+                        conn.Close()
+                    except Exception:
+                        pass
+                    continue
                 return conn, inst["port"], db, inst.get("title", ""), False
             except Exception as e:
                 errors.append(f"Port {inst['port']}: {e}")
+
+        # If all attempts failed, check if we have useful errors about live connections
+        if errors:
+            # Filter to live connection errors
+            live_errors = [e for e in errors if "live connection" in e.lower() or "no local database" in e.lower()]
+            if live_errors:
+                raise RuntimeError(
+                    "All local PBIX instances are live connections (no local database).\n"
+                    + "\n".join(live_errors)
+                    + "\n\nSet PBI_XMLA_SERVER and PBI_XMLA_DATABASE env vars "
+                    "or use remote mode."
+                )
 
     # ── Auto: remote fallback ──
     if remote_server:
         log.info(f"No local PBIX found, falling back to remote: {remote_server}")
         return _connect_remote(remote_server, remote_db, bim_path)
 
+    # If we had live connection errors, surface them
+    if instances and errors:
+        raise RuntimeError(
+            "Could not connect to any local Power BI instance.\n"
+            + "\n".join(f"  {e}" for e in errors[:5])
+        )
+
     raise RuntimeError(
         "No Power BI Desktop instances found and no remote connection configured.\n"
         "Open a PBIX file or set PBI_XMLA_SERVER env var."
     )
 
-
 def _connect_remote(remote_server: str, remote_db: str, bim_path: str = ""):
-    """Connect to remote Power BI, with BIM schema if available."""
+    """Connect to remote Power BI, with BIM schema if available.
+
+    Auto-discovers BIM file by matching database name keywords against
+    .bim files in the search path. Falls back to plain RemotePowerBI
+    (which supports run_dax but not metadata tools) if no BIM found.
+    """
     # Try XMLA first, fall back to REST API + BIM
     try:
         log.info(f"Connecting to remote XMLA: {remote_server}, database: {remote_db}")
@@ -533,15 +607,40 @@ def _connect_remote(remote_server: str, remote_db: str, bim_path: str = ""):
         return conn, 0, db, f"Remote XMLA: {remote_server}", False
     except Exception as e:
         log.warning(f"XMLA failed: {e}, using REST API")
+
+        # Auto-search BIM file if not provided
+        if not bim_path:
+            bim_path = os.environ.get("PBI_BIM_PATH", "")
+        if not bim_path:
+            discovered = _find_bim_file(remote_db)
+            if discovered:
+                log.info(f"Auto-discovered BIM: {discovered}")
+                bim_path = discovered
+
         if bim_path and os.path.exists(bim_path):
             log.info(f"Using BIM schema: {bim_path}")
             conn = RemotePowerBIWithSchema(remote_server, remote_db, bim_path)
             conn.load_schema()
             return conn, 0, remote_db, f"Remote+BIM: {remote_server}", True
+
+        log.warning(f"No BIM file found for '{remote_db}'. Metadata tools will be unavailable.")
         log.info(f"Connecting via REST API: {remote_server}")
         conn = RemotePowerBI(remote_server, remote_db)
-        return conn, 0, remote_db, f"Remote: {remote_server}", True
+        return conn, 0, remote_db, f"Remote (no BIM): {remote_server}", True
 
+def _no_bim_error(tool_name: str, database: str) -> str:
+    """Return a friendly error when BIM schema is unavailable for a remote tool."""
+    return (
+        f"⚠️  BIM file not available\n\n"
+        f"The '{tool_name}' tool requires schema metadata which is loaded from a BIM file.\n"
+        f"Auto-search found no matching .bim file for database '{database}'.\n\n"
+        f"To fix this:\n"
+        f"  1. Export the BIM file from Power BI Desktop (Model view → File → Export → BIM)\n"
+        f"  2. Place it in D:\\LVMH_Max\\ or a brand subdirectory\n"
+        f"  3. Or set PBI_BIM_PATH to the full path of the BIM file\n\n"
+        f"Tools that DON'T require BIM: run_dax, discover\n"
+        f"Use run_dax to execute DAX queries directly against the remote dataset."
+    )
 
 def _format_results(rows: list[dict], title: str, max_rows: int = 200) -> str:
     if not rows:
@@ -557,6 +656,12 @@ def _format_results(rows: list[dict], title: str, max_rows: int = 200) -> str:
                 val = str(val)[:500] + "..."
             lines.append(f"  {key}: {val}")
     return "\n".join(lines)
+
+def _clean_column_name(name: str) -> str:
+    """Strip table prefix from column names like '[Table].[Column]' -> 'Column'."""
+    if '].[' in name and name.endswith(']'):
+        return name.split('].[', 1)[-1].rstrip(']')
+    return name
 
 
 # ──────────────────────────────────────────────────────────────
@@ -577,13 +682,22 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
                 lines.append(f"=== Local PBIX ({len(instances)} instance(s)) ===")
                 for inst in instances:
                     title = inst.get("title", "Unknown")
+                    pbix_path = inst.get("pbix_path", "")
+                    inst_remote = inst.get("remote_server", "")
                     lines.append(f"  Port: {inst['port']}, Title: {title}, PID: {inst['pid']}")
+                    if pbix_path:
+                        lines.append(f"    PBIX: {pbix_path}")
+                    if inst_remote:
+                        lines.append(f"    Live Connection -> {inst.get('remote_database', '')} ({inst_remote})")
                 for inst in instances:
                     try:
                         conn = connect_to_instance(inst["port"])
                         db = get_database_name(conn)
                         conn.Close()
-                        lines.append(f"\n  Port {inst['port']} -> Database: {db}")
+                        if db:
+                            lines.append(f"\n  Port {inst['port']} -> Database: {db}")
+                        else:
+                            lines.append(f"\n  Port {inst['port']} -> No local database (live connection)")
                     except Exception as e:
                         lines.append(f"\n  Port {inst['port']} -> Error: {e}")
             else:
@@ -653,6 +767,8 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
             conn, port, db, title, is_remote = _get_connection(arguments.get("port"))
             if is_remote and hasattr(conn, 'get_tables'):
                 tables = conn.get_tables()
+            elif is_remote:
+                return _no_bim_error("get_tables", db)
             else:
                 try:
                     tables = get_all_tables(conn)
@@ -673,6 +789,8 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
 
             if is_remote and hasattr(conn, 'get_measures'):
                 all_measures = conn.get_measures(table_filter=table_filter or None, name_filter=name_filter or None)
+            elif is_remote:
+                return _no_bim_error("get_measures", db)
             else:
                 try:
                     all_measures = get_all_measures(conn)
@@ -720,6 +838,9 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
                     lines.append(f"  - {c['Name']} ({dtype}){hidden}")
                 return "\n".join(lines)
 
+            if is_remote:
+                return _no_bim_error("get_columns", db)
+
             try:
                 all_cols = get_all_columns(conn)
                 tables = get_all_tables(conn)
@@ -757,6 +878,8 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
 
             if is_remote and hasattr(conn, 'search_dax'):
                 matches = conn.search_dax(pattern, case_sensitive)
+            elif is_remote:
+                return _no_bim_error("search_dax", db)
             else:
                 try:
                     all_measures = get_all_measures(conn)
@@ -808,8 +931,9 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
 
             lines = [f"Model: {db}", f"Rows: {len(rows)}", "=" * 60]
             headers = list(rows[0].keys())
-            lines.append("| " + " | ".join(headers) + " |")
-            lines.append("|" + "|".join("-" * (len(h) + 2) for h in headers) + "|")
+            clean_headers = [_clean_column_name(h) for h in headers]
+            lines.append("| " + " | ".join(clean_headers) + " |")
+            lines.append("|" + "|".join("-" * (len(h) + 2) for h in clean_headers) + "|")
             for row in rows[:50]:
                 vals = [str(row.get(h, "") or "") for h in headers]
                 lines.append("| " + " | ".join(vals) + " |")
@@ -913,6 +1037,23 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
 
         elif tool_name == "get_relationships":
             conn, port, db, title, is_remote = _get_connection(arguments.get("port"))
+
+            if is_remote and hasattr(conn, 'get_relationships'):
+                rels = conn.get_relationships()
+                lines = [f"Model: {db} (BIM Schema)", f"Relationships: {len(rels)}", "=" * 60]
+                for r in rels:
+                    active = "ACTIVE" if r.get("IsActive") else "INACTIVE"
+                    cross = {"1": "Single", "2": "Both"}.get(str(r.get("CrossFilteringBehavior", "")), "?")
+                    lines.append(
+                        f"  [{r.get('FromTable', '?')}] {r.get('FromColumn', '?')} "
+                        f"-> [{r.get('ToTable', '?')}] {r.get('ToColumn', '?')} "
+                        f" [{active}] [CrossFilter={cross}]"
+                    )
+                return "\n".join(lines)
+
+            if is_remote:
+                return _no_bim_error("get_relationships", db)
+
             try:
                 rels = execute_dmv(conn, "SELECT * FROM $SYSTEM.TMSCHEMA_RELATIONSHIPS")
                 tables = get_all_tables(conn)
@@ -1265,6 +1406,17 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
         elif tool_name == "bpa_analyze":
             table_filter = (arguments.get("table_filter") or "").lower()
             conn, port, db, title, is_remote = _get_connection(arguments.get("port"))
+
+            if is_remote and hasattr(conn, 'get_measures'):
+                # Remote with BIM: use schema-based measures
+                all_measures = conn.get_measures(table_filter=table_filter or None)
+                if not all_measures:
+                    return f"No measures found to analyze (table_filter={table_filter})."
+                return analyze_measures(all_measures)
+
+            if is_remote:
+                return _no_bim_error("bpa_analyze", db)
+
             try:
                 all_measures = get_all_measures(conn)
                 tables = get_all_tables(conn)
@@ -1289,6 +1441,24 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
             measure_name = arguments.get("measure_name", "")
             table = arguments.get("table", "")
             conn, port, db, title, is_remote = _get_connection(arguments.get("port"))
+
+            if is_remote and hasattr(conn, 'get_measures'):
+                # Remote with BIM: use schema-based measures
+                all_measures = conn.get_measures()
+                tables = conn.get_tables()
+                table_names = [t['Name'] for t in tables]
+                for m in all_measures:
+                    if '_TableName' not in m:
+                        m['_TableName'] = m.get('TableName', '?')
+                tracker = build_and_analyze(all_measures, table_names)
+                if measure_name:
+                    return tracker.format_dependencies(measure_name, table if table else None)
+                else:
+                    return tracker.format_summary()
+
+            if is_remote:
+                return _no_bim_error("dependency_analyze", db)
+
             try:
                 all_measures = get_all_measures(conn)
                 tables = get_all_tables(conn)
@@ -1430,58 +1600,47 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
             finally:
                 server.Disconnect()
 
-        elif tool_name == "get_report_structure":
+        elif tool_name == "report_analyze":
+            mode = arguments.get("mode", "structure")
             pbix_path = arguments.get("pbix_path", "")
-            page_filter = arguments.get("page", "")
 
             if not pbix_path:
                 instances = discover_pbi_instances()
                 if instances:
                     pbix_path = instances[0].get("pbix_path", "")
                 if not pbix_path:
-                    return "No PBIX path provided and no local PBIX found. Specify --pbix_path."
+                    return "No PBIX path provided and no local PBIX found."
 
-            rp = ReportParser(pbix_path)
-            if page_filter:
-                visuals = rp.get_visuals(page_filter)
-                lines = [f"# Page: {page_filter}", f"Visuals: {len(visuals)}", ""]
-                for v in visuals:
-                    lines.append(f"## [{v['type']}]")
-                    for role, qr in v["fields"]:
-                        lines.append(f"- {role}: `{qr}`")
-                    lines.append("")
-                return "\n".join(lines)
+            if mode == "structure":
+                page_filter = arguments.get("page", "")
+                rp = ReportParser(pbix_path)
+                if page_filter:
+                    visuals = rp.get_visuals(page_filter)
+                    lines = [f"# Page: {page_filter}", f"Visuals: {len(visuals)}", ""]
+                    for v in visuals:
+                        lines.append(f"## [{v['type']}]")
+                        for role, qr in v["fields"]:
+                            lines.append(f"- {role}: `{qr}`")
+                        lines.append("")
+                    return "\n".join(lines)
+                else:
+                    return rp.format_structure()
+
+            elif mode == "measures":
+                cross_check = arguments.get("cross_check", False)
+                bim_path = arguments.get("bim_path", os.environ.get("PBI_BIM_PATH", ""))
+                rp = ReportParser(pbix_path, bim_path=bim_path if cross_check else None)
+                return rp.format_measures(cross_check=cross_check)
+
+            elif mode == "field_usage":
+                field_name = arguments.get("field_name", "")
+                if not field_name:
+                    return "Error: field_name is required for mode=field_usage"
+                rp = ReportParser(pbix_path)
+                return rp.format_usage(field_name)
+
             else:
-                return rp.format_structure()
-
-        elif tool_name == "get_report_measures":
-            pbix_path = arguments.get("pbix_path", "")
-            cross_check = arguments.get("cross_check", False)
-            bim_path = arguments.get("bim_path", os.environ.get("PBI_BIM_PATH", ""))
-
-            if not pbix_path:
-                instances = discover_pbi_instances()
-                if instances:
-                    pbix_path = instances[0].get("pbix_path", "")
-                if not pbix_path:
-                    return "No PBIX path provided. Specify --pbix_path."
-
-            rp = ReportParser(pbix_path, bim_path=bim_path if cross_check else None)
-            return rp.format_measures(cross_check=cross_check)
-
-        elif tool_name == "get_report_field_usage":
-            field_name = arguments.get("field_name", "")
-            pbix_path = arguments.get("pbix_path", "")
-
-            if not pbix_path:
-                instances = discover_pbi_instances()
-                if instances:
-                    pbix_path = instances[0].get("pbix_path", "")
-                if not pbix_path:
-                    return "No PBIX path provided. Specify --pbix_path."
-
-            rp = ReportParser(pbix_path)
-            return rp.format_usage(field_name)
+                return f"Unknown mode: {mode}. Use: structure | measures | field_usage"
 
         elif tool_name == "validate_dax_change":
             expression = arguments.get("expression", "")
@@ -1529,7 +1688,6 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
         log.error(f"Tool error: {traceback.format_exc()}")
         return f"Error: {e}"
 
-
 # ──────────────────────────────────────────────────────────────
 #  Main Loop
 # ──────────────────────────────────────────────────────────────
@@ -1568,7 +1726,6 @@ def main():
         except Exception as e:
             log.error(f"Error: {traceback.format_exc()}")
             send_error(req_id, -32603, f"Internal error: {e}")
-
 
 if __name__ == "__main__":
     main()

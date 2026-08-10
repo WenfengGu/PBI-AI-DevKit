@@ -46,6 +46,7 @@ As of July 2026, there are three main paths for AI assistants to interact with P
 | Remote DAX queries | Yes | No | **Yes (REST API)** |
 | BIM-driven remote queries | Not mentioned | No | **Yes** |
 | Local/remote dual-mode | Yes | No | **Yes (local-first)** |
+| Live connection auto-fallback | Not mentioned | No | **Yes (auto-detect)** |
 | Auto-discovery | Yes | Manual | **Zero-config** |
 | Authentication | Varies | Azure AD | **Local: none / Remote: MSAL** |
 | Runtime | Node.js 20+ | Python | Python |
@@ -85,14 +86,13 @@ Open a PBIX file in Power BI Desktop and you're ready to go.
 Skill Layer (Auto-triggered)
   Trigger words -> Power BI tools
   -------------------------------------------
-MCP Server (27 tools)
+MCP Server (25 tools)
   discover, get_measures, search_dax
   replace_in_measure, run_dax, create_measure
   get_power_query, audit_power_query
   bpa_analyze, dependency_analyze
   batch_operations, get_model_graph
-  get_report_structure, get_report_measures
-  get_report_field_usage, validate_dax_change
+  report_analyze, validate_dax_change
   -------------------------------------------
 Connection Layer (Local-first, Remote-fallback)
   Local:  ADOMD.NET + TOM -> msmdsrv.exe
@@ -107,9 +107,26 @@ The server uses a **local-first, remote-fallback** strategy:
 
 | Mode | Trigger | Read | Write | Metadata |
 |------|---------|:---:|:---:|----------|
-| **Local** | PBIX open in Power BI Desktop | Full | Full | DMV (real-time) |
-| **Remote** | No local PBIX + `PBI_XMLA_SERVER` configured | DAX queries | N/A | BIM file |
-| **Remote+BIM** | Remote + `PBI_BIM_PATH` configured | DAX queries | N/A | BIM file |
+| **Local** | PBIX open in Power BI Desktop (import model) | Full | Full | DMV (real-time) |
+| **Live Connection** | PBIX open (live connection / thin report) | — | — | Auto-fallback to remote |
+| **Remote** | No local PBIX + `PBI_XMLA_SERVER` configured | DAX queries | N/A | BIM auto-discovered |
+| **Remote+BIM** | Remote + BIM file found (auto or manual) | DAX queries | N/A | BIM file (auto-discovered) |
+
+### BIM Auto-Discovery (v1.7.1)
+
+When operating in remote mode, the server automatically searches for a matching `.bim` file by extracting keywords from the database name (e.g. `"SalesAndCrm - target_China_FG"` → `salesandcrm`, `fendi`, `china`, `fg`). It scans `D:\LVMH_Max\` recursively, scores each `.bim` file by keyword match count, and picks the latest match. This means you no longer need to set `PBI_BIM_PATH` manually — place the BIM file anywhere in the project directory structure and it will be found.
+
+To customize the search path, set `PBI_BIM_SEARCH_PATH` (e.g. `D:\MyBIMFiles`).
+
+### Live Connection Auto-Fallback (v1.7.0)
+
+When you open a PBIX that is a live connection (thin report) to a published dataset, the MCP server automatically:
+
+1. Detects the live connection by checking the PBIX's `Connections` file
+2. Extracts the remote server URL and database name
+3. Falls back to remote mode transparently — no manual configuration needed
+
+This means you can query live connection reports without setting `PBI_XMLA_SERVER` and `PBI_XMLA_DATABASE` env vars.
 
 ### Remote Connection Configuration
 
@@ -126,6 +143,8 @@ Add to your `.mcp.json`:
   }
 }
 ```
+
+> **Note:** `PBI_BIM_PATH` is optional — BIM files are auto-discovered from the project directory. Only set it if you want to override the auto-detected path. To customize the search directory, use `PBI_BIM_SEARCH_PATH`.
 
 ---
 
@@ -237,9 +256,11 @@ See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| **1.7.1** | 2026-08-11 | BIM auto-discovery, remote mode crash fix (7 tools), graceful error handling |
+| **1.7.0** | 2026-07-23 | Live connection auto-detection & fallback, discover PBIX path, cloud detection, DAX error parsing |
 | **1.4.3** | 2026-07-14 | PBIX safe modification (`pbix_safe.py`), anti-corruption |
 | **1.4.2** | 2026-07-13 | DAX change safety preview (`validate_dax_change`) |
-| **1.4.0** | 2026-07-13 | Report layout parsing — 3 new tools (`get_report_structure`, `get_report_measures`, `get_report_field_usage`) |
+| **1.4.0** | 2026-07-13 | Report layout parsing — unified `report_analyze` tool (structure/measures/field_usage modes) |
 | **1.2.0** | 2026-07-13 | Remote REST API, BIM-driven queries, dual-mode connection |
 
 ---
@@ -248,12 +269,12 @@ See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 | Item | Detail |
 |------|--------|
-| Version | 1.4.3 (2026-07) |
+| Version | 1.7.1 (2026-08) |
 | License | MIT |
 | Python | 3.11+ |
 | Dependencies | pythonnet, msal, Power BI Desktop |
 | Security | Local: fully offline / Remote: MSAL encrypted auth |
-| Test Suites | 31 |
+| Test Suites | 65 |
 
 ---
 
@@ -261,7 +282,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ```
 PBI-AI-DevKit/
-+-- server.py               MCP server (27 tools, dual-mode)
++-- server.py               MCP server (25 tools, dual-mode)
 +-- ssas_client.py           Connection layer (local + remote + BIM)
 +-- bpa.py                   DAX Best Practice Analyzer (18 rules)
 +-- dependency_tracker.py    Measure dependency tracker
@@ -284,6 +305,6 @@ PBI-AI-DevKit/
 +-- docs/
 |   +-- technical-whitepaper.md
 |   +-- ...
-+-- tests/                   31 test suites
++-- tests/                   Phase 1-14 (65 test suites)
 +-- README.md
 ```
